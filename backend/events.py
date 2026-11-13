@@ -47,7 +47,7 @@ class EventHub:
         if self._log_queue is None:
             self._log_queue = self.log_buffer.subscribe()
             self._status_task = asyncio.create_task(
-                self._status_loop(), name="control-status-push"
+                self._status_loop(), name="webui-status-push"
             )
 
     async def stop(self) -> None:

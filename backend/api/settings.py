@@ -627,7 +627,7 @@ def _apply_whitelist_hot(rt: Any) -> None:
 async def list_providers(request: Request) -> dict[str, Any]:
     """只读列出 provider 与 Agent 绑定。
 
-    写操作在 ``/api/providers``（``backend/api/providers.py``）。这里保留是为了兼容
+    写操作在 ``/api/providers``（``webui/api/providers.py``）。这里保留是为了兼容
     旧前端调用，实现直接复用，避免两份逻辑各自漂移。
     """
     return await providers_api.list_all(request)

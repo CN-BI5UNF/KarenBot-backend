@@ -178,6 +178,15 @@ class RuntimeHost:
                 )
                 return False
 
+            # The maintenance database stores only cleanup plans/jobs and
+            # resource metadata.  Older GUI data roots (and a data root where
+            # Runtime was first blocked before this database existed) can have
+            # a valid persona DB but no maintenance.sqlite3.  That made the
+            # compatibility gate report "maintenance v0 -> v1" forever: the
+            # gate ran before the store had a chance to create the schema.
+            # Creating this derived database is safe and idempotent.
+            await self._ensure_safe_infrastructure()
+
             compat = self._runtime_compat_gate()
             if not compat.get("ok"):
                 self.state = STATE_MAINTENANCE
@@ -234,6 +243,48 @@ class RuntimeHost:
             logger.info("正在重启 Runtime ...")
             await self.stop()
             return await self.start()
+
+    async def _ensure_safe_infrastructure(self) -> None:
+        """Create derived infrastructure databases that are safe to recreate.
+
+        ``maintenance.sqlite3`` only contains cleanup plans/jobs and resource
+        inventory metadata.  It is deliberately excluded from user data
+        contracts, but the compatibility gate probes it as a versioned plane.
+        If it is missing, initialize the current schema before evaluating the
+        gate so a valid existing instance is not mistaken for a v0 migration
+        that can never complete.
+        """
+        paths = self.build_paths()
+        db_file = Path(
+            getattr(
+                paths,
+                "MAINTENANCE_DB_FILE",
+                Path(paths.DATA_DIR) / "maintenance.sqlite3",
+            )
+        )
+        if db_file.exists() or db_file.is_symlink():
+            return
+        # Do not create this database for a genuinely empty instance: the
+        # compatibility gate has a dedicated "empty instance" branch that
+        # requires no probeable databases at all.  Bootstrapping here would
+        # turn a fresh post-wizard root into an apparent persona-v0 migration.
+        from core.compat import read_local_state
+
+        local = read_local_state(
+            paths.DATA_DIR, config_path=paths.CONFIG_FILE
+        )
+        if not any(
+            probe.plane != "maintenance" for probe in local.databases
+        ):
+            return
+        from memory.maintenance_store import MaintenanceStore
+
+        try:
+            await MaintenanceStore(db_file).initialize()
+        except Exception:  # noqa: BLE001 - gate will surface the block
+            logger.exception("初始化缺失的维护元数据库失败：%s", db_file)
+            return
+        logger.info("已初始化缺失的维护元数据库：%s", db_file)
 
     def _runtime_compat_gate(self) -> dict[str, Any]:
         """同 launcher 的目标 manifest + 本地数据门禁，防 WebUI 绕过。"""
@@ -370,7 +421,7 @@ class RuntimeHost:
         """按向导 payload 写入 config.yaml 与密钥。
 
         返回 ``{"ok": bool, "message": str, "provider_id": str, "model": str}``。
-        payload 结构见 ``backend/api/system.py`` 的 ``SetupPayload``。
+        payload 结构见 ``webui/api/system.py`` 的 ``SetupPayload``。
 
         两处容易踩的地方：
 
@@ -447,7 +498,9 @@ class RuntimeHost:
                 api_key_id=key_id or None,
                 extra_headers=dict(item.get("extra_headers") or {}),
                 timeout_seconds=float(item.get("timeout_seconds") or 120.0),
+                model_vendor=item.get("model_vendor") or None,
                 reasoning_style=item.get("reasoning_style") or None,
+                reasoning_effort_style=item.get("reasoning_effort_style") or None,
             )
 
         if existing is not None and not payload.get("replace_providers"):

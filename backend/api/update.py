@@ -9,11 +9,19 @@ check 需要用户确认后才 apply；apply 前再次核对 token、目标 comm
 from __future__ import annotations
 
 import logging
+import os
+import time
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
+from backend.module_updater import (
+    FRONTEND_COMPONENT,
+    ModuleUpdateError,
+    ModuleUpdateService,
+)
 from core.backend_restart import restart_backend_callback
 from core.updater import (
     UPDATE_REF,
@@ -40,10 +48,11 @@ class UpdateCheckPayload(BaseModel):
 
 class UpdateApplyPayload(BaseModel):
     confirmation_token: str = Field(min_length=8, max_length=256)
-    target_sha: str = Field(min_length=7, max_length=64)
+    target_sha: str = Field(default="", max_length=64)
     confirm_branch_switch: bool = False
     confirm_rollback: bool = False
     defer_restart: bool = False
+    acknowledge_prerelease: bool = False
     """新版前端先返回更新结果，再弹窗询问是否重启后端。"""
 
 
@@ -55,12 +64,67 @@ class UpdateProbePayload(BaseModel):
     timeout_seconds: float = Field(default=8.0, ge=1.0, le=30.0)
 
 
-def build_service(host: Any, rt: Any | None = None) -> UpdateService | None:
+def _module_frontend(host: Any) -> str:
+    frontend = str(getattr(host, "frontend", "") or "")
+    return frontend if frontend in FRONTEND_COMPONENT else ""
+
+
+def build_module_service(host: Any) -> ModuleUpdateService | None:
+    """Construct the split-module updater for GUI/WebUI installations."""
+    frontend = _module_frontend(host)
+    if not frontend:
+        return None
+    try:
+        paths = host.build_paths()
+    except Exception:  # noqa: BLE001
+        logger.exception("构造模块更新服务时读取数据路径失败")
+        return None
+    update_cfg = None
+    runtime = getattr(host, "rt", None)
+    config = getattr(runtime, "config", None)
+    if config is not None:
+        update_cfg = getattr(config, "update", None)
+    timeout = int(getattr(update_cfg, "check_timeout_seconds", 60) or 60)
+    interval = int(getattr(update_cfg, "check_interval_days", 9) or 9)
+    key = (
+        str(getattr(host, "project_root", "")),
+        str(paths.DATA_DIR),
+        "module",
+        frontend,
+        timeout,
+        interval,
+    )
+    cached = getattr(host, "_module_update_service_cache", None)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    try:
+        service = ModuleUpdateService(
+            Path(host.project_root),
+            paths.DATA_DIR,
+            frontend,
+            timeout_seconds=timeout,
+            check_interval_days=interval,
+            restart_callback=restart_backend_callback,
+            allow_development_tree=(
+                os.environ.get("KAREN_ALLOW_MODULE_UPDATE_DIRTY") == "1"
+            ),
+        )
+    except ModuleUpdateError as exc:
+        logger.warning("模块更新服务不可用：%s", exc)
+        return None
+    host._module_update_service_cache = (key, service)
+    return service
+
+
+def build_service(host: Any, rt: Any | None = None) -> UpdateService | ModuleUpdateService | None:
     """从 RuntimeHost 构造/复用更新服务。
 
     Scheduler 和 HTTP 路由共用同一缓存，避免自动检查与页面检查各自持有一份
     状态锁、互相看不到对方写入的 update_state.json。
     """
+    module_service = build_module_service(host)
+    if module_service is not None:
+        return module_service
     runtime = rt if rt is not None else getattr(host, "rt", None)
     if runtime is None:
         return None
@@ -101,24 +165,50 @@ def build_service(host: Any, rt: Any | None = None) -> UpdateService | None:
     return service
 
 
-def service_for_host(host: Any) -> UpdateService | None:
-    """后台 watchdog 用；Runtime 未就绪时返回 None。"""
+def service_for_host(host: Any) -> UpdateService | ModuleUpdateService | None:
+    """后台 watchdog 用；Runtime 未就绪时模块更新器仍可查询发布。"""
+    module_service = build_module_service(host)
+    if module_service is not None:
+        return module_service
     runtime = getattr(host, "rt", None)
     if runtime is None:
         return None
     return build_service(host, runtime)
 
 
-def _service(request: Request) -> UpdateService:
-    rt = require_runtime(request)
+def _service(request: Request) -> UpdateService | ModuleUpdateService:
     host = request.app.state.host
+    module_service = build_module_service(host)
+    if module_service is not None:
+        return module_service
+    rt = require_runtime(request)
     service = build_service(host, rt)
     if service is None:
         raise HTTPException(status_code=503, detail="更新服务尚未就绪")
     return service
 
 
-def _http_error(exc: UpdateError) -> HTTPException:
+def _http_error(exc: UpdateError | ModuleUpdateError) -> HTTPException:
+    if isinstance(exc, ModuleUpdateError):
+        status = 409
+        if exc.code in {
+            "github_network_error",
+            "github_rate_limited",
+            "github_http_error",
+            "module_download_failed",
+        }:
+            status = 502
+        elif exc.code in {
+            "github_auth_required",
+            "github_repo_unavailable",
+            "release_invalid",
+            "prerelease_confirmation_required",
+        }:
+            status = 400 if exc.code == "release_invalid" else 409
+        return HTTPException(
+            status_code=status,
+            detail={"code": exc.code, "message": exc.message, "mode": "module"},
+        )
     network_codes = {"git_timeout", "git_failed", "git_missing"}
     status = 409 if exc.code not in network_codes else 502
     if exc.code in {"release_invalid", "mirror_scheme", "mirror_credentials",
@@ -135,6 +225,9 @@ def _http_error(exc: UpdateError) -> HTTPException:
 async def version(request: Request) -> dict[str, Any]:
     """右下角版本占位；不要求 Runtime 已启动。"""
     host = request.app.state.host
+    module_service = build_module_service(host)
+    if module_service is not None:
+        return await module_service.version_info()
     paths = host.build_paths()
     service = UpdateService(host.project_root, paths.DATA_DIR)
     return await service.version_info()
@@ -145,9 +238,12 @@ async def status(request: Request) -> dict[str, Any]:
     try:
         service = _service(request)
         data = await service.status()
+        if isinstance(service, ModuleUpdateService):
+            notification = await service.available_snapshot(include_commit=False)
+            return {**data, "notification": notification}
         # status() already resolved HEAD; avoid a second git rev-parse here.
         notification = await service.available_snapshot(include_commit=False)
-    except UpdateError as exc:
+    except (UpdateError, ModuleUpdateError) as exc:
         raise _http_error(exc) from exc
     return {
         "repo": UPDATE_REPO_URL,
@@ -163,6 +259,15 @@ async def probe(
 ) -> dict[str, Any]:
     """只读测速 GitHub 官方与镜像站，不执行更新。"""
     service = _service(request)
+    if isinstance(service, ModuleUpdateService):
+        return {
+            "mode": "module",
+            "frontend": service.frontend,
+            "checked_at": time.time(),
+            "timeout_seconds": payload.timeout_seconds,
+            "results": [],
+            "message": "模块更新使用 GitHub Releases API，不进行镜像测速。",
+        }
     try:
         return await service.probe_mirrors(
             timeout_seconds=payload.timeout_seconds
@@ -176,7 +281,7 @@ async def available(request: Request) -> dict[str, Any]:
     """只读缓存：总览绿标只轮询这里，不触发网络。"""
     try:
         return await _service(request).available_snapshot()
-    except UpdateError as exc:
+    except (UpdateError, ModuleUpdateError) as exc:
         raise _http_error(exc) from exc
 
 
@@ -187,7 +292,7 @@ async def releases(
 ) -> dict[str, Any]:
     try:
         return await _service(request).releases(force=force)
-    except UpdateError as exc:
+    except (UpdateError, ModuleUpdateError) as exc:
         raise _http_error(exc) from exc
 
 
@@ -199,7 +304,7 @@ async def check(
     target_tag = payload.target_tag if payload else None
     try:
         return await _service(request).check(target_tag=target_tag)
-    except UpdateError as exc:
+    except (UpdateError, ModuleUpdateError) as exc:
         raise _http_error(exc) from exc
 
 
@@ -209,14 +314,21 @@ async def apply(
     payload: Annotated[UpdateApplyPayload, Body()],
 ) -> dict[str, Any]:
     try:
-        return await _service(request).apply(
+        service = _service(request)
+        if isinstance(service, ModuleUpdateService):
+            return await service.apply(
+                confirmation_token=payload.confirmation_token,
+                acknowledge_prerelease=payload.acknowledge_prerelease,
+                defer_restart=payload.defer_restart,
+            )
+        return await service.apply(
             confirmation_token=payload.confirmation_token,
             target_sha=payload.target_sha,
             confirm_branch_switch=payload.confirm_branch_switch,
             confirm_rollback=payload.confirm_rollback,
             defer_restart=payload.defer_restart,
         )
-    except UpdateError as exc:
+    except (UpdateError, ModuleUpdateError) as exc:
         raise _http_error(exc) from exc
 
 
@@ -227,9 +339,12 @@ async def preferences(
 ) -> dict[str, Any]:
     """更新提醒偏好：勾选“之后不再提示”后由前端写 suppress_badge。"""
     service = _service(request)
-    if payload.suppress_badge is not None:
-        return await service.set_suppress_badge(payload.suppress_badge)
-    return await service.available_snapshot()
+    try:
+        if payload.suppress_badge is not None:
+            return await service.set_suppress_badge(payload.suppress_badge)
+        return await service.available_snapshot()
+    except (UpdateError, ModuleUpdateError) as exc:
+        raise _http_error(exc) from exc
 
 
 __all__ = ["build_service", "router", "service_for_host"]

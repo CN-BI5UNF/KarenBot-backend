@@ -1,12 +1,12 @@
 """表情包管理路由（原 GUI 的 ``ui/dashboard/emoji_section.py``）。
 
 原面板直接操作文件系统；WebUI 换成 HTTP，所以文件读写全部经
-``backend/emoji_store.py`` 的校验，且**不把 EMOJI_DIR 挂成静态目录**——
+``webui/emoji_store.py`` 的校验，且**不把 EMOJI_DIR 挂成静态目录**——
 否则同目录下任何非图片文件都会被直接下载到。
 
 鉴权：``/api/emoji/*`` 不在 ``webui/server.py`` 的 PUBLIC_PREFIXES 里，
 因此全部需要令牌。浏览器 ``<img>`` 走同源 cookie 自动带凭据；
-脚本场景可用 ``?token=`` 或 Bearer（见 ``backend/auth.py``）。
+脚本场景可用 ``?token=`` 或 Bearer（见 ``webui/auth.py``）。
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@
 对应原 GUI 的 ``ui/dashboard/personas_page.py``。人格目录约定见
 ``agents/persona_loader.py``：``personas/<name>/persona_prompt.py``。
 
-生成 / 改写走 ``backend/persona_admin.py``（纯函数，好单测）；它复用
+生成 / 改写走 ``webui/persona_admin.py``（纯函数，好单测）；它复用
 ``agents/persona_gen_agent.py`` 的 ``PersonaGenAgent``——那套生成器一直是完整的，
 只是此前 WebUI 没有入口。
 

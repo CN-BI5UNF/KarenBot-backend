@@ -10,7 +10,7 @@
 生成人格却还用着旧模型"的错位。
 
 生成器本身（``agents/persona_gen_agent.py``）一行没动——它是完整的，只是一直
-没接上入口。``backend/wizard/persona_render.py`` 的 ``render_minimal_persona``
+没接上入口。``webui/wizard/persona_render.py`` 的 ``render_minimal_persona``
 同理，此前零调用，现在在这里被用上。
 
 落盘约定（与 ``agents/persona_loader.py`` 一致）：

@@ -14,7 +14,7 @@ QTextBrowser 的 HTML 渲染。迁移时只搬了后半段（过滤/排序在 ``
   重写一遍必然丢细节。
 
 新增的只有 ``display_item_to_json`` / ``display_items_json``：把 dataclass 翻成
-HTTP 能返回的结构，供 ``backend/api/chats.py`` 使用。
+HTTP 能返回的结构，供 ``webui/api/chats.py`` 使用。
 
 导入方向：``records`` → ``display_items``，本模块 → 三者，没有环。
 """

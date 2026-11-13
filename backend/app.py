@@ -3,7 +3,7 @@
 Both frontends use this module:
 
 * ``webui/server.py`` adds static-file routes around it for the browser console.
-* the standalone native GUI project runs it on loopback for its GTK client.
+* ``gui/local_server.py`` runs it on loopback for the native GTK client.
 
 The backend deliberately contains no WebUI/GTK imports.  A JSON API added here
 is available to both clients automatically, which keeps feature parity from
@@ -44,6 +44,7 @@ def create_control_app(
     docs: bool = False,
     auth_error_message: str = "未授权：请在页面上输入访问令牌",
     enable_websocket: bool = True,
+    frontend: str = "",
 ) -> FastAPI:
     """Build the shared FastAPI application.
 
@@ -100,6 +101,10 @@ def create_control_app(
     app.state.auth = auth
     app.state.hub = hub
     app.state.log_buffer = log_buffer
+    app.state.frontend = str(frontend or "")
+    if frontend:
+        # The update API and its watchdog distinguish GUI and WebUI installs.
+        host.frontend = str(frontend)
 
     for router in ALL_ROUTERS:
         app.include_router(router)

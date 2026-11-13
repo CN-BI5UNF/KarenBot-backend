@@ -358,7 +358,7 @@ def _steps_meta() -> list[dict[str, Any]]:
 async def setup_step(request: Request, body: Annotated[dict, Body()]) -> dict[str, Any]:
     """向导的步骤流转。
 
-    流转规则全在 ``backend/wizard/flow.py``（原桌面端原样搬过来的），前端只负责渲染，
+    流转规则全在 ``webui/wizard/flow.py``（原桌面端原样搬过来的），前端只负责渲染，
     不自己判断"下一步去哪"——两条路径 + PERSONA_CREATE 分支的判断写在前端一定会漂。
     """
     from backend.wizard.flow import (
@@ -416,7 +416,7 @@ async def setup_step(request: Request, body: Annotated[dict, Body()]) -> dict[st
 async def setup_copy() -> dict[str, Any]:
     """向导 / 仪表盘的中文文案表。
 
-    这两份文案是从原桌面端逐字复制过来的（``backend/copy.py``、``backend/wizard/copy.py``），
+    这两份文案是从原桌面端逐字复制过来的（``webui/copy.py``、``webui/wizard/copy.py``），
     之前一直没人引用。发到前端后，向导的措辞就与桌面端完全一致，
     改文案也只需动一处（两边共用一个文件）。
     """

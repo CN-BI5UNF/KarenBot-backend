@@ -1,7 +1,7 @@
 """Provider 管理路由（原 GUI 设置页「模型」分页的增删改部分）。
 
-``backend/api/settings.py`` 里的 ``/api/settings/providers`` 保留为只读兼容入口，
-写操作全在这里。逻辑都在 ``backend/provider_admin.py``（纯函数，好单测）。
+``webui/api/settings.py`` 里的 ``/api/settings/providers`` 保留为只读兼容入口，
+写操作全在这里。逻辑都在 ``webui/provider_admin.py``（纯函数，好单测）。
 
 写接口落盘后会尝试热重建 provider 与 LLM Agent；只有热重建失败时才返回
 ``needs_restart: true``。内存数据库、人格和向量库不会因此重启。

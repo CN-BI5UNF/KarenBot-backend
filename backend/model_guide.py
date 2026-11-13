@@ -3,7 +3,7 @@
 从原 ``ui/widgets/model_install_guide.py`` 提取：去掉 QProcess / QDialog /
 QDesktopServices 相关实现，只保留纯粹的路径计算、依赖探测与文案生成。
 WebUI 的「模型管理」页直接消费这些函数；真正的后台安装改用 asyncio 子进程，
-真正的后台安装逻辑见 ``backend/api/models.py``。
+见 ``webui/model_install.py``。
 """
 
 from __future__ import annotations
