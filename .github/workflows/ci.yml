@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest packaging
+
+      - name: Compile backend
+        run: python -m compileall -q backend
+
+      - name: Run module updater tests
+        run: python -m pytest -q tests -k "not api_builds_module_service"
+
+      - name: Verify module layout
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          for rel in ("backend/app.py", "backend/runtime_host.py", "backend/module_updater.py"):
+              assert (Path(rel)).is_file(), rel
+          print("backend module layout ok")
+          PY
