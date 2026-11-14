@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 核心程序并入
+
+- `main.py`、`main_cli.py`、`service_cli.py`、`core/`、`features/`、`model_plugins/`、`plugins/`、`app_config/`、`adapters/`、`agents/`、`memory/`、`mind/`、`providers/`、`tools/`、`utils/`、`packaging/`、`deploy/`、`docs/` 等核心程序并入本仓库。
+- 本仓库现在提供“核心程序 + 后端”基础包；`gui/`、`webui/` 仍由各自模块仓库维护。
+- 在线安装可以直接下载本仓库源码包，再叠加所选界面模块，不需要额外的第四个仓库。
+- 不包含用户数据、配置、密钥、日志、模型权重和虚拟环境。
+
 ## v0.1.1-alpha.1 — 2026-11-15
 
 - 与 `KarenBot-GUI`、`KarenBot-WebUI` 的 v0.1.1-alpha.1 配套。

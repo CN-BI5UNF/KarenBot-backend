@@ -20,3 +20,14 @@ logs/
 dist/
 build/
 *.egg-info/
+
+# === 核心程序并入后的用户运行数据 ===
+.karen-run/
+.debata-run/
+releases/
+modules.json
+
+# 用户人格：只保留包初始化文件
+personas/*
+!personas/__init__.py
+!personas/README.md
