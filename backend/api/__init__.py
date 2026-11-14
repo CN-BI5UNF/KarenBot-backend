@@ -31,6 +31,7 @@ from . import (
     models,
     overview,
     personas,
+    plugins,
     providers,
     settings,
     slang,
@@ -61,6 +62,7 @@ ALL_ROUTERS = [
     storage.router,
     context.router,
     update.router,
+    plugins.router,
     backup.router,
 ]
 

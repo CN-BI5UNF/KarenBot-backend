@@ -7,12 +7,23 @@
 from __future__ import annotations
 
 import logging
+import os
+import stat
 import time
+from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from backend.chatlog.display_paging import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    DisplayPageError,
+    get_display_page,
+    get_indexed_display_page,
+    warm_display_index,
+)
 from backend.chatlog.display_pipeline import (
     DEFAULT_VISIBLE_RECORD_LIMIT,
     build_display_items,
@@ -26,6 +37,51 @@ from .deps import require_runtime
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
+
+
+def _runtime_persona_id(runtime: Any) -> str:
+    """Runtime 只暴露 persona.name；不要静默落到 "default" 查错人格。"""
+    persona = getattr(runtime, "persona", None)
+    name = str(getattr(persona, "name", "") or "").strip()
+    return name or str(getattr(runtime, "persona_id", "") or "").strip() or "default"
+
+
+def _filter_missing_attachments(
+    items: list[dict[str, Any]], workspace_root: Path | None
+) -> list[dict[str, Any]]:
+    """工作区文件可能已被清理；响应里去掉不存在的附件，避免坏图/坏下载。"""
+    if workspace_root is None:
+        for item in items:
+            item["attachments"] = []
+            _filter_missing_attachments(item.get("tool_results") or [], None)
+        return items
+    root = workspace_root
+    for item in items:
+        attachments = item.get("attachments")
+        if isinstance(attachments, list):
+            kept = []
+            for att in attachments:
+                if not isinstance(att, dict):
+                    continue
+                text = str(att.get("path") or "").replace("\\", "/").lstrip("/")
+                while text.startswith("workspace/"):
+                    text = text[len("workspace/") :]
+                parts = [part for part in text.split("/") if part and part != "."]
+                if not parts or any(part == ".." for part in parts):
+                    continue
+                target = root.joinpath(*parts)
+                try:
+                    st = os.lstat(target)
+                except OSError:
+                    continue
+                if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                    continue
+                kept.append(att)
+            item["attachments"] = kept
+        nested = item.get("tool_results")
+        if isinstance(nested, list):
+            _filter_missing_attachments(nested, root)
+    return items
 
 
 def _conversation_summary(conv: dict[str, Any]) -> dict[str, Any]:
@@ -78,7 +134,7 @@ async def conversation(
         if db_path is not None:
             db_file = db_path / "karen.db"
             if db_file.exists():
-                persona_id = getattr(rt, "persona_id", "default")
+                persona_id = _runtime_persona_id(rt)
                 mgr = ChatPaginationManager(db_file)
                 res = mgr.fetch_page(
                     ChatPageRequest(
@@ -136,7 +192,7 @@ async def chat_page(
 
     data_dir = getattr(rt.paths, "DATA_DIR", Path("data"))
     db_file = data_dir / "karen.db"
-    persona_id = getattr(rt, "persona_id", "default")
+    persona_id = _runtime_persona_id(rt)
     mgr = ChatPaginationManager(db_file)
     res = mgr.fetch_page(
         ChatPageRequest(
@@ -159,9 +215,89 @@ async def chat_page(
     }
 
 
+@router.get("/display/page")
+async def display_page(
+    request: Request,
+    conversation_id: str = Query(..., description="如 private:123456 / group:987654"),
+    before_id: str | None = Query(
+        None, description="当前已显示的最旧一项 ID；留空取最新一页"
+    ),
+    cursor: str | None = Query(None, description="上一页返回的 next_cursor"),
+    limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    show_chat: bool = Query(True),
+    show_system: bool = Query(True),
+    show_tools: bool = Query(True),
+    show_reasoning: bool = Query(True),
+    media_only: bool = Query(False, description="只看图片/文件"),
+    q: str = Query("", description="在显示项正文里搜索"),
+) -> dict[str, Any]:
+    """DisplayItem 快照分页：从 ``before_id`` 之前取更早的一页。
+
+    与 ``/display`` 返回同样的归一化显示项，但只在首次请求时跑完整
+    管线，后续“加载更早”复用快照并按 item id 切片。
+    """
+    rt = require_runtime(request)
+    try:
+        # 更早的页优先走持久化索引；索引缺失/损坏/锚点失效时自动回退
+        # 到进程内快照分页，保证接口始终可用。
+        try:
+            indexed = await get_indexed_display_page(
+                rt,
+                conversation_id=conversation_id,
+                before_id=before_id,
+                cursor=cursor,
+                page_size=limit,
+                search_text=q,
+                show_chat=show_chat,
+                show_system=show_system,
+                show_tools=show_tools,
+                show_reasoning=show_reasoning,
+                media_only=media_only,
+            )
+        except DisplayPageError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("持久化显示索引不可用，回退快照分页")
+            indexed = None
+        if indexed is not None:
+            indexed["items"] = _filter_missing_attachments(
+                indexed.get("items") or [],
+                Path(getattr(rt.paths, "WORKSPACE_DIR", "")) if getattr(rt, "paths", None) else None,
+            )
+            return indexed
+        snapshot = await get_display_page(
+            rt,
+            conversation_id=conversation_id,
+            before_id=before_id,
+            cursor=cursor,
+            page_size=limit,
+            search_text=q,
+            show_chat=show_chat,
+            show_system=show_system,
+            show_tools=show_tools,
+            show_reasoning=show_reasoning,
+            media_only=media_only,
+        )
+        snapshot["items"] = _filter_missing_attachments(
+            snapshot.get("items") or [],
+            Path(getattr(rt.paths, "WORKSPACE_DIR", "")) if getattr(rt, "paths", None) else None,
+        )
+        return snapshot
+    except DisplayPageError as exc:
+        raise HTTPException(
+            status_code=409 if exc.reset_required else 400,
+            detail={
+                "code": exc.code,
+                "message": exc.message,
+                "reset_required": exc.reset_required,
+            },
+        ) from exc
+
+
 @router.get("/display")
 async def display(
     request: Request,
+    background_tasks: BackgroundTasks,
     conversation_id: str = Query(..., description="如 private:123456 / group:987654"),
     limit: int = Query(
         DEFAULT_VISIBLE_RECORD_LIMIT,
@@ -228,9 +364,18 @@ async def display(
     if truncated:
         items = items[-limit:]
 
+    # 首屏返回后再后台建索引，用户第一次点“加载更早”时通常已经就绪。
+    background_tasks.add_task(warm_display_index, rt, conversation_id)
+    workspace_root = (
+        Path(rt.paths.WORKSPACE_DIR)
+        if getattr(rt, "paths", None) and getattr(rt.paths, "WORKSPACE_DIR", None)
+        else None
+    )
     return {
         "conversation": _conversation_summary(target),
-        "items": display_items_json(items),
+        "items": _filter_missing_attachments(
+            display_items_json(items), workspace_root
+        ),
         "total": total,
         "filtered_total": filtered_total,
         "truncated": truncated,

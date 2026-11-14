@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -175,17 +176,39 @@ def _raw_send_order(raw: dict[str, Any]) -> int | None:
     return None
 
 
-def _unique_item_id(item_id: str, record_index: int, seen_ids: set[str]) -> str:
-    if item_id not in seen_ids:
-        seen_ids.add(item_id)
-        return item_id
-    unique = f"{item_id}:{record_index}"
+def _unique_item_id(item_id: str, record: dict[str, Any], seen_ids: set[str]) -> str:
+    """始终拼上记录自身的稳定标识，而不是窗口内下标。
+
+    同一批记录在“最近 300 条窗口”和“整段会话快照”里必须得到同一个
+    item id，否则前端拿窗口里的 before_id 去整段快照里找会找不到。
+    即使窗口里没有冲突，也必须拼后缀：另一条同 base id 的记录可能在
+    窗口外，整段快照会给它加上后缀，导致两边的 id 不一致。
+    """
+    stable = _stable_record_suffix(record)
+    unique = f"{item_id}:{stable}"
     suffix = 1
     while unique in seen_ids:
         suffix += 1
-        unique = f"{item_id}:{record_index}:{suffix}"
+        unique = f"{item_id}:{stable}:{suffix}"
     seen_ids.add(unique)
     return unique
+
+
+def _stable_record_suffix(record: dict[str, Any]) -> str:
+    for key in (
+        "message_id",
+        "msg_id",
+        "original_msg_id",
+        "archive_id",
+        "tool_call_id",
+        "record_uuid",
+        "id",
+    ):
+        value = record.get(key)
+        if value not in (None, ""):
+            return str(value)
+    payload = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha1(payload.encode("utf-8", "replace")).hexdigest()[:12]
 
 
 def _sort_display_items(items: list[DisplayItem]) -> list[DisplayItem]:

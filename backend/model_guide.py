@@ -13,7 +13,7 @@ import shutil
 from collections.abc import Callable
 from pathlib import Path
 
-from plugins import PluginRecord
+from model_plugins import PluginRecord
 
 _IMPORT_NAME_OVERRIDES = {
     "sentence-transformers": "sentence_transformers",

@@ -13,12 +13,18 @@ bytes to the browser.
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from backend.file_types import MAX_IMAGE_BYTES, image_media_type
 
@@ -413,3 +419,158 @@ async def workspace_file_content(
 
 
 __all__ = ["router", "WorkspaceFileError"]
+
+
+class LaunchPayload(BaseModel):
+    path: str = Field(..., min_length=1)
+    action: str = Field("open", pattern="^(open|reveal)$")
+
+
+_INLINE_MIME_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+    "application/pdf",
+    "text/plain",
+    "text/markdown",
+    "video/mp4",
+    "video/webm",
+    "video/quicktime",
+    "video/x-matroska",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/ogg",
+    "audio/amr",
+}
+
+
+def _content_disposition(name: str, *, inline: bool) -> str:
+    disposition = "inline" if inline else "attachment"
+    ascii_name = name.encode("ascii", "replace").decode("ascii").replace('"', "_")
+    return (
+        f'{disposition}; filename="{ascii_name}"; '
+        f"filename*=UTF-8''{quote(name, safe='')}"
+    )
+
+
+def _launch_default(target: Path) -> None:
+    commands: list[list[str]] = []
+    if sys.platform == "darwin":
+        commands.append(["open", str(target)])
+    elif os.name == "nt":
+        commands.append(["cmd", "/c", "start", "", str(target)])
+    commands.extend([
+        ["xdg-open", str(target)],
+        ["gio", "open", str(target)],
+    ])
+    last_error: Exception | None = None
+    for command in commands:
+        try:
+            subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return
+        except (FileNotFoundError, OSError) as exc:
+            last_error = exc
+    raise WorkspaceFileError(
+        f"无法调用系统默认应用：{last_error}",
+        code="workspace_launch_failed",
+    )
+
+
+def _frontend(request: Request) -> str:
+    host = getattr(getattr(request, "app", None), "state", None)
+    host = getattr(host, "host", None)
+    return str(getattr(host, "frontend", "") or "")
+
+
+@router.get("/files/download")
+async def workspace_file_download(
+    request: Request,
+    path: str = "",
+    inline: bool = False,
+) -> FileResponse:
+    try:
+        root = _root(request)
+        parts = _normalize_parts(root, path)
+        if not parts:
+            raise WorkspaceFileError(
+                "该操作需要具体文件路径", code="workspace_path_invalid"
+            )
+        target = await asyncio.to_thread(_resolve_target, root, parts)
+        st = await asyncio.to_thread(os.lstat, target)
+        if stat.S_ISLNK(st.st_mode):
+            raise WorkspaceFileError(
+                "不允许通过符号链接下载文件",
+                code="workspace_symlink_forbidden",
+            )
+        if not stat.S_ISREG(st.st_mode):
+            raise WorkspaceFileError(
+                "路径不是普通文件", code="workspace_not_regular_file"
+            )
+        media_type = (
+            (mimetypes.guess_type(target.name)[0] or "application/octet-stream")
+            .lower()
+        )
+        served_inline = bool(inline and media_type in _INLINE_MIME_TYPES)
+        return FileResponse(
+            target,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": _content_disposition(
+                    target.name, inline=served_inline
+                ),
+                "Cache-Control": "private, max-age=60",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+    except WorkspaceFileError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/files/launch")
+async def workspace_file_launch(
+    request: Request, payload: LaunchPayload
+) -> dict[str, Any]:
+    """只允许原生 GUI（同机）调用默认应用打开/定位文件。"""
+    if _frontend(request) != "gui":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "workspace_launch_forbidden",
+                "message": "浏览器模式不能直接启动服务端默认应用；请使用下载。",
+            },
+        )
+    try:
+        root = _root(request)
+        parts = _normalize_parts(root, payload.path)
+        if not parts:
+            raise WorkspaceFileError(
+                "该操作需要具体文件路径", code="workspace_path_invalid"
+            )
+        target = await asyncio.to_thread(_resolve_target, root, parts)
+        st = await asyncio.to_thread(os.lstat, target)
+        if stat.S_ISLNK(st.st_mode):
+            raise WorkspaceFileError(
+                "不允许通过符号链接打开文件",
+                code="workspace_symlink_forbidden",
+            )
+        if not stat.S_ISREG(st.st_mode):
+            raise WorkspaceFileError(
+                "路径不是普通文件", code="workspace_not_regular_file"
+            )
+        launch_target = target if payload.action == "open" else target.parent
+        await asyncio.to_thread(_launch_default, launch_target)
+        return {
+            "ok": True,
+            "action": payload.action,
+            "path": _display_path(parts),
+        }
+    except WorkspaceFileError as exc:
+        raise _http_error(exc) from exc

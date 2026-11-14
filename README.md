@@ -1,6 +1,6 @@
 # KarenBot-backend
 
-KarenBot 的**共享后端控制面**模块。仓库已公开，当前版本 **v0.1.1-alpha**。
+KarenBot 的**共享后端控制面**模块。仓库已公开，当前版本 **v0.1.1-alpha.1**。
 
 > 这是模块源码仓库，不是可独立启动的完整 KarenBot 应用。它需要配合 KarenBot 宿主运行时
 > （`core/`、`agents/`、`providers/`、`app_config/`、`features/`、`memory/` 等）使用。
@@ -14,6 +14,8 @@ KarenBot 的**共享后端控制面**模块。仓库已公开，当前版本 **v
 - 页面 API 与 WebSocket：`backend/api/`、`backend/events.py`
 - 浏览器/桌面共用的设置声明、配置提交、向导、聊天归一化、Provider/人格管理
 - 令牌鉴权、日志环形缓冲、更新检查等运行时基础设施
+- 应用插件协议骨架：`backend.plugin_host`、前端插件清单发现、`GET /api/plugins`
+- 修复 WebUI 控制面未传 `frontend="webui"` 导致模块更新器身份为空
 
 WebUI 只负责静态资源和 HTTP 入口，原生 GUI 只负责本机回环服务和 GTK4 控件；
 两边不再复制后端逻辑。
@@ -22,10 +24,10 @@ WebUI 只负责静态资源和 HTTP 入口，原生 GUI 只负责本机回环服
 
 | 项目 | 版本 |
 |---|---|
-| 本模块 release | `v0.1.1-alpha`（预发布） |
+| 本模块 release | `v0.1.1-alpha.1`（预发布） |
 | 兼容的 KarenBot 宿主 | `1.0.1-alpha.1` 拆分版本及后续兼容版本 |
-| 配套 WebUI 模块 | `KarenBot-WebUI` `v0.1.1-alpha` |
-| 配套 GUI 模块 | `KarenBot-GUI` `v0.1.1-alpha` |
+| 配套 WebUI 模块 | `KarenBot-WebUI` `v0.1.1-alpha.1` |
+| 配套 GUI 模块 | `KarenBot-GUI` `v0.1.1-alpha.1` |
 
 仓库根目录的 `VERSION` 是模块发布版本；`backend/__init__.py` 中的代码版本沿用宿主兼容版本
 `1.0.1-alpha.1`。两者用途不同，不冲突。
@@ -107,7 +109,7 @@ app = create_control_app(
 ## 版本与发布
 
 - 版本标签格式：`vMAJOR.MINOR.PATCH[-dev]`
-- 当前为 `v0.1.1-alpha`，是**预发布开发版**，接口可能变化。
+- 当前为 `v0.1.1-alpha.1`，是**预发布开发版**，接口可能变化。
 - GitHub Releases 会自动提供源码归档；每个 release 同时附带模块源码 zip。
 - 不兼容变更必须升 `MAJOR` 并在 release notes 中写明宿主兼容范围。
 

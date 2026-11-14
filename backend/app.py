@@ -16,6 +16,7 @@ import asyncio
 import logging
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -25,6 +26,7 @@ from .api import ALL_ROUTERS
 from .auth import TokenAuth
 from .events import EventHub
 from .logbuffer import install_log_buffer
+from .plugin_host import PluginContainer
 from .runtime_host import RuntimeHost
 from .update_watch import run_update_watchdog
 
@@ -105,6 +107,14 @@ def create_control_app(
     if frontend:
         # The update API and its watchdog distinguish GUI and WebUI installs.
         host.frontend = str(frontend)
+
+    project_root = getattr(host, "project_root", None)
+    if project_root:
+        container = PluginContainer(Path(project_root))
+        container.discover()
+    else:
+        container = None
+    app.state.plugins = container
 
     for router in ALL_ROUTERS:
         app.include_router(router)

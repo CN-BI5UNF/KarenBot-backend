@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.1-alpha.1 — 2026-11-15
+
+- 与 `KarenBot-GUI`、`KarenBot-WebUI` 的 v0.1.1-alpha.1 配套。
+- 新增应用插件协议骨架：`backend/plugin_host.py`（清单校验、前端发现/激活、`BackendPlugin` 协议）和 `GET /api/plugins`。
+- 前端插件清单支持 `gui/plugin.json`、`webui/plugin.json`，统一入口可发现可用前端。
+- 修复 WebUI 控制面未传 `frontend="webui"`，导致模块更新器身份为空、走 legacy 更新的问题。
+- 同步最新聊天显示分页/持久索引、媒体附件、工作区文件下载/打开等后端能力。
+- 更新页数据按组件返回；后端与前端 Release 仍由各自仓库发布。
+
 ## v0.1.1-alpha — 2026-11-13
 
 首个公开发布版本。

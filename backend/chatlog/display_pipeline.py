@@ -35,6 +35,7 @@ from .display_items import (
     _unique_item_id,
 )
 from .grouping import _LEGACY_HEADER_LINE_RE, _LEGACY_HEADER_RE, _record_role
+from .media_refs import extract_media_attachments
 from .models import DisplayItem, DisplaySeverity, SendDisplayContext
 from .records import (
     _record_conversation_id_for_display,
@@ -118,6 +119,7 @@ def display_item_to_json(item: DisplayItem) -> dict[str, Any]:
         "collapsed_by_default": item.collapsed_by_default,
         "related_tool_call_id": item.related_tool_call_id,
         "related_message_id": item.related_message_id,
+        "attachments": extract_media_attachments(item),
         "tool_results": [display_item_to_json(x) for x in item.tool_results],
     }
 
@@ -142,7 +144,7 @@ def normalize_history_records(
     tool_calls: dict[str, DisplayItem] = {}
     seen_ids: set[str] = set()
     send_context = _build_send_display_context(records)
-    for record_index, record in enumerate(records):
+    for record in records:
         record_items = normalize_history_record(
             record,
             persona_name=persona_name,
@@ -159,7 +161,7 @@ def normalize_history_records(
         for item in record_items:
             if _should_skip_generated_outbound(item, send_context):
                 continue
-            item.item_id = _unique_item_id(item.item_id, record_index, seen_ids)
+            item.item_id = _unique_item_id(item.item_id, record, seen_ids)
             if item.kind == "tool_call" and item.related_tool_call_id:
                 tool_calls[item.related_tool_call_id] = item
                 items.append(item)
