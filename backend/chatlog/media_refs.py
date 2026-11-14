@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import re
+from html import unescape
 from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 from .models import DisplayItem
 
@@ -51,6 +53,108 @@ def _safe_path(value: str) -> str:
     if not parts or any(part == ".." for part in parts):
         return ""
     return "/".join(parts)
+
+
+_REMOTE_MEDIA_HOSTS = frozenset({"multimedia.qq.com"})
+_REMOTE_MEDIA_SUFFIXES = (".qpic.cn", ".qq.com.cn")
+
+
+def safe_remote_media_url(value: Any) -> str:
+    """返回允许后端代理的 QQ 媒体 URL；其他来源一律拒绝。
+
+    旧聊天记录里可能仍有 QQ 原图 URL。截图里的工作区文件被清理后，这个
+    URL 是最后一条恢复路径；只允许 HTTPS 的 QQ 图片/文件域名，避免把
+    附件接口变成任意 URL 代理。
+    """
+    text = unescape(str(value or "").strip())
+    if (
+        not text
+        or "\\" in text
+        or any(ord(char) < 33 or ord(char) == 127 for char in text)
+    ):
+        return ""
+    try:
+        parsed = urlsplit(text)
+        host = (parsed.hostname or "").rstrip(".").lower()
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() != "https"
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or (port is not None and port != 443)
+    ):
+        return ""
+    if host not in _REMOTE_MEDIA_HOSTS and not any(
+        host.endswith(suffix) for suffix in _REMOTE_MEDIA_SUFFIXES
+    ):
+        return ""
+    return text
+
+
+def _record_attachments(item: DisplayItem) -> list[dict[str, Any]]:
+    raw = item.raw if isinstance(item.raw, dict) else {}
+    record = raw.get("record") if isinstance(raw.get("record"), dict) else raw
+    values = record.get("attachments") if isinstance(record, dict) else None
+    if not isinstance(values, list):
+        return []
+    return [value for value in values if isinstance(value, dict)]
+
+
+def _remote_attachment_candidates(
+    item: DisplayItem,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in _record_attachments(item):
+        url = safe_remote_media_url(
+            raw.get("url") or raw.get("file_url") or raw.get("download_url")
+        )
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        file_id = str(
+            raw.get("file_id") or raw.get("file") or raw.get("name") or ""
+        ).strip()
+        name = PurePosixPath(file_id.replace("\\", "/")).name if file_id else ""
+        if not name:
+            try:
+                name = PurePosixPath(urlsplit(url).path).name
+            except ValueError:
+                name = ""
+        name = name or "附件"
+        kind = str(raw.get("type") or raw.get("kind") or "").strip().lower()
+        if kind not in {"image", "video", "audio", "file"}:
+            mime = str(
+                raw.get("mime") or raw.get("content_type") or ""
+            ).lower()
+            if mime.startswith("image/"):
+                kind = "image"
+            elif mime.startswith("video/"):
+                kind = "video"
+            elif mime.startswith("audio/"):
+                kind = "audio"
+            else:
+                kind = "file"
+        size = None
+        extra = raw.get("extra") if isinstance(raw.get("extra"), dict) else {}
+        for source in (raw, extra):
+            for key in ("file_size", "size", "byte_size"):
+                value = source.get(key)
+                if isinstance(value, int) and value >= 0:
+                    size = value
+                    break
+                if isinstance(value, str) and value.isdigit():
+                    size = int(value)
+                    break
+            if size is not None:
+                break
+        candidates.append(
+            {"url": url, "name": name, "kind": kind, "size": size}
+        )
+    return candidates
 
 
 def _asset_index(item: DisplayItem) -> dict[str, dict[str, Any]]:
@@ -168,6 +272,39 @@ def extract_media_attachments(item: DisplayItem) -> list[dict[str, Any]]:
             _attachment(path=path, name=name, kind=kind, asset=asset)
         )
         seen.add(path)
+
+    # 工作区文件可能已被存储清理；事件记录里仍保留 QQ 原始 URL 时把它
+    # 挂到同类型附件上，让前端可以在原文件缺失时走后端代理重新获取。
+    for candidate in _remote_attachment_candidates(item):
+        target = next(
+            (
+                att
+                for att in attachments
+                if att.get("kind") == candidate["kind"]
+                and not att.get("remote_url")
+            ),
+            None,
+        )
+        if target is None and candidate["kind"] in {"image", "video"}:
+            target = next(
+                (att for att in attachments if not att.get("remote_url")),
+                None,
+            )
+        if target is not None:
+            target["remote_url"] = candidate["url"]
+            if target.get("size") is None and candidate["size"] is not None:
+                target["size"] = candidate["size"]
+            continue
+        attachment = _attachment(
+            path="",
+            name=candidate["name"],
+            kind=candidate["kind"],
+            asset=None,
+        )
+        attachment["remote_url"] = candidate["url"]
+        if candidate["size"] is not None:
+            attachment["size"] = candidate["size"]
+        attachments.append(attachment)
     return attachments
 
 

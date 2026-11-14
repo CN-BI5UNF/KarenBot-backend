@@ -7,6 +7,8 @@
 - 前端插件清单支持 `gui/plugin.json`、`webui/plugin.json`，统一入口可发现可用前端。
 - 修复 WebUI 控制面未传 `frontend="webui"`，导致模块更新器身份为空、走 legacy 更新的问题。
 - 同步最新聊天显示分页/持久索引、媒体附件、工作区文件下载/打开等后端能力。
+- 修复附件原文件被存储清理后只剩 `[图片 workspace=...]` 裸文本：保留 `missing` 状态与原因，并从事件记录附带 QQ `remote_url` 作为远程恢复线索。
+- 新增 `GET /api/chats/attachments/remote`：仅允许 QQ HTTPS 媒体域名，沿用 SSRF/重定向/大小限制，供已清理附件的回退下载。
 - 更新页数据按组件返回；后端与前端 Release 仍由各自仓库发布。
 
 ## v0.1.1-alpha — 2026-11-13

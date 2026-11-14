@@ -7,13 +7,16 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
 import stat
 import time
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from backend.chatlog.display_paging import (
@@ -30,7 +33,13 @@ from backend.chatlog.display_pipeline import (
     display_items_json,
 )
 from backend.chatlog.grouping import _group_records_by_conversation
+from backend.chatlog.media_refs import safe_remote_media_url
 from backend.chatlog.records import _load_chat_page_records
+from features.vision.image_assets import (
+    ImageAssetError,
+    download_remote_image_bytes,
+    download_remote_media_bytes,
+)
 
 from .deps import require_runtime
 
@@ -49,10 +58,23 @@ def _runtime_persona_id(runtime: Any) -> str:
 def _filter_missing_attachments(
     items: list[dict[str, Any]], workspace_root: Path | None
 ) -> list[dict[str, Any]]:
-    """工作区文件可能已被清理；响应里去掉不存在的附件，避免坏图/坏下载。"""
+    """标记已清理的附件，而不是把它们悄悄删掉。
+
+    工作区文件可能被存储清理删除。旧实现直接丢弃附件，前端只能看到
+    ``[图片 workspace=...]`` 原文，看起来像预览功能失效。这里保留附件并
+    设置 ``missing``，由前端区分“可预览”“原图已清理”“可尝试远程恢复”。
+    """
     if workspace_root is None:
         for item in items:
-            item["attachments"] = []
+            attachments = item.get("attachments")
+            if isinstance(attachments, list):
+                for att in attachments:
+                    if not isinstance(att, dict):
+                        continue
+                    att["missing"] = True
+                    att.setdefault(
+                        "missing_reason", "无法校验工作区文件是否存在"
+                    )
             _filter_missing_attachments(item.get("tool_results") or [], None)
         return items
     root = workspace_root
@@ -67,12 +89,24 @@ def _filter_missing_attachments(
                 while text.startswith("workspace/"):
                     text = text[len("workspace/") :]
                 parts = [part for part in text.split("/") if part and part != "."]
+                if not text:
+                    if att.get("remote_url"):
+                        att["missing"] = True
+                        att.setdefault(
+                            "missing_reason",
+                            "工作区文件已清理，可尝试从 QQ 原链接重新获取",
+                        )
+                        kept.append(att)
+                    continue
                 if not parts or any(part == ".." for part in parts):
                     continue
                 target = root.joinpath(*parts)
                 try:
                     st = os.lstat(target)
                 except OSError:
+                    att["missing"] = True
+                    att.setdefault("missing_reason", "原图/文件已被清理")
+                    kept.append(att)
                     continue
                 if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
                     continue
@@ -82,6 +116,64 @@ def _filter_missing_attachments(
         if isinstance(nested, list):
             _filter_missing_attachments(nested, root)
     return items
+
+
+@router.get("/attachments/remote")
+async def remote_attachment(
+    url: str = Query("", min_length=1),
+    name: str = Query(""),
+    kind: str = Query("file"),
+    inline: bool = Query(True),
+) -> Response:
+    """代取 QQ 原图/文件，供工作区文件已被清理的历史附件回退。
+
+    只接受 ``media_refs.safe_remote_media_url`` 允许的 QQ HTTPS 域名；
+    下载沿用 image_assets 的 SSRF、重定向和大小限制。URL 不写日志。
+    """
+    safe_url = safe_remote_media_url(url)
+    if not safe_url:
+        raise HTTPException(status_code=400, detail="附件来源不受支持")
+    kind = kind if kind in {"image", "video", "audio", "file"} else "file"
+    try:
+        if kind == "image":
+            data = await download_remote_image_bytes(
+                safe_url, max_bytes=20_000_000
+            )
+        else:
+            data = await download_remote_media_bytes(
+                safe_url, max_bytes=64_000_000
+            )
+    except ImageAssetError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"无法从原链接获取附件：{exc}"
+        ) from exc
+    filename = str(name or "").strip() or "附件"
+    media_type = (
+        mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    ).lower()
+    if kind == "image" and not media_type.startswith("image/"):
+        media_type = "image/jpeg"
+    can_inline = (
+        kind in {"image", "video", "audio"}
+        or media_type == "application/pdf"
+        or media_type.startswith("text/")
+    )
+    disposition = "inline" if inline and can_inline else "attachment"
+    ascii_name = (
+        filename.encode("ascii", "replace").decode("ascii").replace('"', "_")
+    )
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": (
+                f'{disposition}; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{quote(filename, safe='')}"
+            ),
+            "Cache-Control": "private, max-age=60",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 def _conversation_summary(conv: dict[str, Any]) -> dict[str, Any]:
