@@ -8,6 +8,8 @@ venv/
 config.yaml
 config_backups/
 secrets.*
+# app_config/secrets.py 是源码，不是密钥数据
+!app_config/secrets.py
 *.pem
 *.key
 *.crt
