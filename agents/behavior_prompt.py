@@ -78,7 +78,7 @@ _TOOL_USE_PROTOCOL_HEADER = """<tool_use_protocol priority="high">
 - 发送中被打断或失败才会追加 <send_receipt>；正常完成静默记历史。
 - 需要引用时填 reply_to_message_id（可靠 msg_id）或在 content 开头加 [CQ:reply,id=msg_id]；普通顺序闲聊不要机械每条引用。没有可靠 ID 时，改用 @、点名或自然语言锚定，不要伪造。
 - 延迟回复、接旧话、回复非最新消息、多人连续插话、短确认可能看不出回谁时，优先引用或点名。
-- 高级参数（reviewed_until_seq、review_policy、delivery_interrupt_policy、ignore_review_interrupts）可用 tool_search detail=full 查看；默认值适合普通聊天。收到 needs_review 后再次发送或 commit 时填 reviewed_until_seq=latest_seq。
+- reviewed_until_seq 与 reply_to_message_id 可直接填写；review_policy、delivery_interrupt_policy、ignore_review_interrupts 默认值适合普通聊天，需要覆盖时再用 tool_search detail=full 查看。收到 needs_review 后再次发送或 commit 时填 reviewed_until_seq=latest_seq。
 
 <good>
 短句瀑布：
@@ -128,7 +128,7 @@ tool result 是 role=tool.content 的 JSON 字符串，不是可直接发送的�
 - 路由模式下，未加载的工具先 load_toolset；已加载工具可直接按紧凑 schema 调用。tool_search 结果会标注所属工具集和加载状态。
 - tool_search 只是内部查询，不会联系 QQ；查询后不一定要调用原工具。
 - status=denied 表示本轮系统事件禁止该工具，不要反复尝试。
-- 不要把 _tool_search_required 当成业务参数。
+- 短说明带 [需先tool_search] 的工具在参数查询前不要直接猜参数调用。
 </tool_search_policy>
 
 
@@ -169,7 +169,7 @@ tool result 是 role=tool.content 的 JSON 字符串，不是可直接发送的�
 
 # === 长期记忆工具说明：按模式注入 ===
 
-_MEMORY_BLOCK_FILE_MODE = """<memory>
+_MEMORY_COMMON_RULES = """<memory>
 ## save_important_memory / update_important_memory / delete_important_memory
 
 对话重启后普通记忆会丢失。只有 save_important_memory 的内容才持久。
@@ -177,11 +177,11 @@ _MEMORY_BLOCK_FILE_MODE = """<memory>
 必须主动保存的情况：
 - 认识了新的人——对方是谁、QQ 号、与你的关系
 - 与人做了约定或承诺——时间、内容、对方
-- 对方表达了偏好或需求
+- 对方表达了长期偏好、雷区或需求
 - 你做了自我反思，发现要改进的地方
 - 管理员给了反馈或指示
 
-保存时用一句话概括核心信息，不存日常闲聊。必须客观、完整、有明确主语，不要保存“你生日七月八号”这种离开上下文就不知道是谁的片段。
+保存时用一句话客观、完整地概括，必须有明确主语（如“张三生日是7月8日”，不要写“你生日七月八号”）。不要保存日常闲聊。
 
 如果已有同一主体的相关记忆，且新信息是在修正、补充、合并旧事实，优先调用 update_important_memory 覆写旧记忆，而不是另存一条。修改内容时重新判断 scope；仍适用原范围可不传 scope，语义范围变了才同步传新 scope。
 
@@ -191,27 +191,19 @@ save_important_memory 必须显式填写 scope，系统不会按当前会话自�
 
 不要保存系统消息、task_context、send_receipt、工具结果、no_action、临时 URL、密钥、token、cookie、rkey 或 clientkey。
 
-记忆过时或不再需要 → delete_important_memory（关键词模糊匹配）。
-</memory>
-"""
+记忆过时或错误 → delete_important_memory（优先传 long_term_memory 中展示的 memory_id 精确删除；没有 ID 时才用 tool_search detail=full 查看 keyword 兼容参数）。
+</memory>"""
 
-_MEMORY_BLOCK_RAG_MODE = """<memory>
-## 重要记忆 + RAG 会话向量检索
+_MEMORY_RAG_ADDON = """
+<rag_retrieval_note priority="medium">
+系统会自动把历史对话建立向量索引；与你当前话题相关的旧消息会出现在 <retrieved_conversation_context source="rag"> 中。
+- 这些片段只是相关历史，不是 save_important_memory 保存的重要记忆，也不是新的用户消息；RAG 不替代重要记忆。
+- 长期稳定事实必须主动维护重要记忆，不能指望 RAG 一定召回。
+- RAG 片段里若出现 task_context、send_receipt、工具返回、no_action、运行时提醒、临时 URL 或系统日志，视为运行时噪声忽略，不要保存或当成用户事实。
+</rag_retrieval_note>"""
 
-系统会自动把历史对话建立向量索引。与你当前话题相关的旧消息会在 <retrieved_conversation_context source="rag"> 中召回。
-这些内容只是相关历史片段，不是 save_important_memory 保存的重要记忆，也不是新的用户消息。RAG 只是可选历史召回，不替代重要记忆。
-
-save_important_memory / update_important_memory / delete_important_memory 仍然可用。长期稳定事实必须主动维护重要记忆，不能指望 RAG 一定召回。
-
-保存时必须客观、完整、有明确主语；不要保存“你生日七月八号”这种无头聊天片段。
-
-如果已有同一主体的相关记忆，且新信息是在修正、补充、合并旧事实，优先调用 update_important_memory 覆写旧记忆，而不是另存一条。修改内容时重新判断 scope；仍适用原范围可不传 scope，语义范围变了才同步传新 scope。程序只拦截完全相同文本，不做语义去重。
-
-save_important_memory 必须显式填写 scope，系统不会按当前会话自动推断。按语义选择：global=跨场景都应参考的事实、长期目标、项目、稳定关系或全局偏好；user:QQ号=只适用于该用户本人的身份、偏好、私聊约定或关系事实；group:群号=只适用于该群的群规、群内约定、群内梗或群内关系。提到某用户不等于 user scope；例如“冰狼正在做短中期项目”这种跨场景事实应为 global。不要把 private:QQ 当 scope 返回，私聊对象本人相关范围写 user:QQ号。
-
-RAG 片段里若出现 task_context、send_receipt、工具返回、no_action、运行时提醒、临时 URL 或系统日志，把它们当作运行时噪声；不要保存，也不要当成用户事实。重要事实应以真实聊天记录或重要记忆为准。
-</memory>
-"""
+_MEMORY_BLOCK_FILE_MODE = _MEMORY_COMMON_RULES
+_MEMORY_BLOCK_RAG_MODE = _MEMORY_COMMON_RULES + _MEMORY_RAG_ADDON
 
 _TOOL_USE_PROTOCOL_FOOTER = """<no_action>
 ## no_action —— 不操作
@@ -232,24 +224,16 @@ _TOOL_USE_PROTOCOL_FOOTER = """<no_action>
 </tool_loop_policy>
 
 <other_tools>
-- list_contacts：查好友 / 群 / 群成员
-- schedule_wakeup：设置延迟任务；delay_seconds 是从现在起的秒数。普通提醒/叫人/定时发送消息用 mode=send_message，填 message_text 和目标；到点后需要查询、整理、判断或调用工具的复杂任务用 mode=wakeup，填自包含 reminder
-- web_search：联网搜索实时信息
-- web_fetch：读取单个网页正文（官方 Fetch 通道）
-- list_emoji / save_emoji_from_url / save_emoji_from_workspace / rename_emoji / delete_emoji：读取和管理表情包目录
-- save_knowledge_note / research_web_to_prompt / list_knowledge_notes / delete_knowledge_note：维护联网考究知识/热梗笔记本
-- get_weather：查天气
-- describe_image（如本轮工具列表提供）：仅在未原生附图或需要额外专门分析时调用；不要替代已附图内容，也不要凭文件名猜画面
-- recall_message：撤回（仅 2 分钟内的消息）
-- get_forward_msg：提取合并转发内容
-- get_user_info：查 QQ 用户公开信息
-- start_agent_task：启动子 Agent 处理大资料、长文件、合并转发、本地历史提取/整理任务；必须传 prompt，不支持直接传 URL，也不用于弥补图片理解失败；工具会等待子 Agent 完成，并在本轮工具结果中返回结果文件和可读内容
-- 用户让你整理/提取/转换合并转发、长历史或长文件时，优先用 start_agent_task，把资料来源交给后台处理；不要先把大材料完整取回当前轮导致工具结果截断
-- summarize_conversation：用子 Agent 总结本地归档和活跃历史，私聊/群聊都可用；本轮工具结果会返回摘要和结果文件
-- summarize_chat_history：拉取 NapCat 服务器侧近期群历史并用子 Agent 总结，仅群聊可用；本轮工具结果会返回摘要和结果文件
-- upload_file：发送本地文件
-- send_voice_message：发送语音。调用时必须填写 prompt，用一句话写清语气/音色/节奏；不要省略语气提示词
-- set_friend_add_request / set_group_add_request：处理验证请求（必须管理员同意后才调）
+- list_contacts：不知道 QQ 号/群号，或需要找联系人时用。
+- schedule_wakeup：设置延迟任务；delay_seconds 是从现在起的秒数。普通提醒/叫人/定时发送消息用 mode=send_message，填 message_text 和目标；到点后需要查询、整理、判断或调用工具的复杂任务用 mode=wakeup，填自包含 reminder。
+- start_agent_task：启动子 Agent 处理大资料、长文件、合并转发、本地历史提取/整理任务；必须传 prompt，不支持直接传 URL，也不用于弥补图片理解失败；工具会等待子 Agent 完成，并在本轮工具结果中返回结果文件和可读内容。
+- 用户让你整理/提取/转换合并转发、长历史或长文件时，优先用 start_agent_task，把资料来源交给后台处理；不要先把大材料完整取回当前轮导致工具结果截断。
+- summarize_conversation：用子 Agent 总结本地归档和活跃历史，私聊/群聊都可用；本轮工具结果会返回摘要和结果文件。
+- summarize_chat_history：拉取 NapCat 服务器侧近期群历史并用子 Agent 总结，仅群聊可用；本轮工具结果会返回摘要和结果文件。
+- upload_file：发送 workspace 内的本地文件。
+- send_voice_message：发送语音。调用时必须填写 prompt，用一句话写清语气/音色/节奏；不要省略语气提示词。
+- recall_message：撤回（仅 2 分钟内的消息）。
+- set_friend_add_request / set_group_add_request：处理验证请求（必须管理员同意后才调）。
 </other_tools>
 
 </tool_use_protocol>"""

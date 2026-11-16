@@ -23,23 +23,31 @@ def _discover(registry: Any, query: str) -> list[dict[str, Any]]:
         spec = registry.get_spec(name)
         if spec is None:
             continue
+        name_lower = name.lower()
+        tags = [str(tag).lower() for tag in spec.search_tags or []]
         haystacks = [
-            name.lower(),
+            name_lower,
             str(spec.description or "").lower(),
             str(spec.short_description or "").lower(),
-            " ".join(str(tag).lower() for tag in spec.search_tags or []),
+            " ".join(tags),
             " ".join(str(item).lower() for item in spec.toolsets or []),
         ]
         if not any(needle in value for value in haystacks):
             continue
-        if name.lower() == needle:
+        # 精确命中的检索标签优先于正文里偶然出现的子串（例如“不确定时”
+        # 不应压过 schedule_wakeup 的“定时”标签）。
+        if name_lower == needle:
             score = 0
-        elif name.lower().startswith(needle):
+        elif name_lower.startswith(needle):
             score = 1
-        elif needle in name.lower():
+        elif needle in name_lower:
             score = 2
-        else:
+        elif any(needle == tag for tag in tags):
             score = 3
+        elif any(needle in tag for tag in tags):
+            score = 4
+        else:
+            score = 5
         ranked.append(
             (
                 score,
@@ -69,6 +77,8 @@ def _discover(registry: Any, query: str) -> list[dict[str, Any]]:
     ),
     args_model=ToolSearchArgs,
     category="control",
+    search_tags=["工具", "查询", "参数", "schema", "tool", "search", "help"],
+    concurrency_safe=True,
 )
 async def tool_search(args: ToolSearchArgs, ctx: ToolContext) -> dict:
     registry = ctx.extras.get("tool_registry")

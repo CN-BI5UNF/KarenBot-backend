@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — 工具提示与运行时优化
+
+- `group_trigger_window` 在 compact 模式改为常驻紧凑 schema，task_context 不再要求先 `tool_search`，省掉一轮无效调用。
+- `reply_to_message_id` / `reviewed_until_seq` 不再从 compact schema 隐藏；`needs_review` 重发和引用回复可直接使用。
+- 精简发送目标、图片识图、记忆 scope 等高频字段描述；Schema 截断改为优先按句/分号收尾；stub schema 移除 `_tool_search_required` 假参数。
+- 合并 file/RAG 记忆提示词，修正 `delete_important_memory` 的关键词矛盾；裁剪 `<other_tools>` 中的重复工具说明。
+- 只读工具支持连续批次并发执行；`tool_call_id` 改为独立上下文字段，消除共享 `extras` 竞态。
+- 修复动态/守卫/账本/子 Agent 执行器包装层丢失并发标记的问题，确保并发优化在真实聊天路径生效。
+- RAG 向量库入库/加载时预归一化，支持可选 NumPy 矩阵检索；SQLite 连接改为复用并在 shutdown 关闭。
+- RAG 关闭时等待被取消但仍在执行的 SQLite 线程，避免关闭连接与在途写入竞态；空/异维向量按 0 分参与排序。
+- RAG 取消时让 DB 写入与内存索引更新作为一个不可中断操作完成；`top_k` 线程结束前保持索引锁，避免孤儿线程与后台索引竞态。
+- `PersonaDB` 复用 SQLite 长连接，并在关闭时释放。
+- Anthropic 协议自动注入 Prompt Caching 断点（tools / system / 稳定历史末尾），上游拒绝 `cache_control` 时安全降级。
+- 为全部工具补齐 `search_tags`，为复杂工具补齐 `examples`；`tool_search` 优先精确标签命中。
+- 清理 `backend/chatlog_tmp/` 与 `tools/base.py` 死代码；CI 安装项目依赖并运行完整测试矩阵。
+
 ## Unreleased — 核心程序并入
 
 - `main.py`、`main_cli.py`、`service_cli.py`、`core/`、`features/`、`model_plugins/`、`plugins/`、`app_config/`、`adapters/`、`agents/`、`memory/`、`mind/`、`providers/`、`tools/`、`utils/`、`packaging/`、`deploy/`、`docs/` 等核心程序并入本仓库。

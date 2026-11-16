@@ -203,7 +203,11 @@ TOOLSETS: tuple[Toolset, ...] = (
     Toolset(
         id="workspace",
         title="文件与文档",
-        description="本机 AI 工作区文件读写/编辑/删除、运行 Python、上传到 QQ、后台整理；隔离执行用 container。",
+        description=(
+            "本机 AI 工作区文件读写/编辑/删除、运行 Python、上传到 QQ、后台整理。"
+            "日常聊天查看用户发来的 PDF/DOCX/XLSX 或小笔记用本集；"
+            "进入 work 编码工作流后改用 coding 集。"
+        ),
         tools=(
             "read_file",
             "write_file",
@@ -228,6 +232,8 @@ TOOLSETS: tuple[Toolset, ...] = (
         description=(
             "本机/容器编码工具：读写、编辑、命令、glob、grep、目录；"
             "host 固定 Claude Code 语义，container 使用当前激活的 Pi/DSH/Claude Code 模式。"
+            "进入 work 编码状态或多文件代码开发/补丁修改时用本集；"
+            "日常查看 PDF/Office 文档请用 workspace.read_file。"
         ),
         tools=(
             "agent_read",

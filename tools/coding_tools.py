@@ -162,14 +162,15 @@ def _plan_denied(ctx: ToolContext) -> dict[str, Any] | None:
 @tool(
     name="agent_read",
     description=(
-        "读取文件并返回带行号的文本。target=host 读本机 workspace，target=container "
-        "读容器 /workspace。支持 offset/limit 分页、二进制检测和字节上限；图片请用 "
-        "describe_image。需要修改文件前先用它确认原文。"
+        "编码专用：读取源码文件并返回带行号文本（不含 PDF/Office 解析；读文档请用 read_file）。"
+        "target=host 读本机 workspace，target=container 读容器 /workspace。支持 offset/limit "
+        "分页、二进制检测和字节上限；图片请用 describe_image。需要修改文件前先用它确认原文。"
     ),
     args_model=AgentReadArgs,
     category="coding",
     search_tags=["read", "file", "coding", "agent", "读取"],
     examples=[{"path": "src/main.py", "offset": 1, "limit": 200, "target": "host"}],
+    concurrency_safe=True,
 )
 async def agent_read(args: AgentReadArgs, ctx: ToolContext) -> dict[str, Any]:
     backend, error = _backend(ctx, args.target)
@@ -335,6 +336,7 @@ async def agent_bash(args: AgentBashArgs, ctx: ToolContext) -> dict[str, Any]:
     category="coding",
     search_tags=["glob", "find", "file", "coding", "agent", "查找"],
     examples=[{"pattern": "**/*.py", "path": ".", "target": "host"}],
+    concurrency_safe=True,
 )
 async def agent_glob(args: AgentGlobArgs, ctx: ToolContext) -> dict[str, Any]:
     backend, error = _backend(ctx, args.target)
@@ -362,6 +364,7 @@ async def agent_glob(args: AgentGlobArgs, ctx: ToolContext) -> dict[str, Any]:
     category="coding",
     search_tags=["grep", "search", "regex", "coding", "agent", "搜索"],
     examples=[{"pattern": "TODO", "glob": "*.py", "target": "host"}],
+    concurrency_safe=True,
 )
 async def agent_grep(args: AgentGrepArgs, ctx: ToolContext) -> dict[str, Any]:
     backend, error = _backend(ctx, args.target)
@@ -393,6 +396,7 @@ async def agent_grep(args: AgentGrepArgs, ctx: ToolContext) -> dict[str, Any]:
     category="coding",
     search_tags=["ls", "list", "directory", "coding", "agent", "目录"],
     examples=[{"path": ".", "target": "host"}],
+    concurrency_safe=True,
 )
 async def agent_ls(args: AgentLsArgs, ctx: ToolContext) -> dict[str, Any]:
     backend, error = _backend(ctx, args.target)

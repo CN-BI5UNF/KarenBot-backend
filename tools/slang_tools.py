@@ -28,6 +28,8 @@ def _error(message: str) -> dict[str, Any]:
     ),
     args_model=LookupSlangArgs,
     category="slang",
+    search_tags=["黑话", "缩写", "群梗", "slang", "meme", "网络用语"],
+    concurrency_safe=True,
 )
 async def lookup_slang(args: LookupSlangArgs, ctx: ToolContext) -> dict:
     service = getattr(ctx, "slang_service", None)

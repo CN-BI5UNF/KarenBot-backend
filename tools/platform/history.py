@@ -26,7 +26,26 @@ from .forward import _SAFE_PATH_RE
     category="platform",
     schema_mode="stub",
     short_description="低频归档筛选工具。先用 tool_search 查询参数摘要；需要完整 schema 时 detail=full。",
-    search_tags=["platform", "archive", "history", "recall"],
+    search_tags=[
+        "归档",
+        "历史",
+        "筛选",
+        "关键词",
+        "时间范围",
+        "platform",
+        "archive",
+        "history",
+        "recall",
+    ],
+    examples=[
+        {
+            "conversation_ids": ["group:123456"],
+            "keywords": ["生日"],
+            "time_ranges": [{"start": "2026-01-01", "end": "2026-12-31"}],
+            "keyword_operator": "any",
+            "limit": 50,
+        }
+    ],
 )
 async def filter_archive_records(args: FilterArchiveRecordsArgs, ctx: ToolContext) -> dict:
     if ctx.archive is None:
@@ -68,6 +87,14 @@ async def filter_archive_records(args: FilterArchiveRecordsArgs, ctx: ToolContex
     ),
     args_model=RecallHistoryArgs,
     category="platform",
+    search_tags=["归档", "历史", "召回", "旧消息", "archive", "history", "recall"],
+    examples=[
+        {
+            "conversation_id": "group:123456",
+            "keyword": "生日",
+            "limit": 20,
+        }
+    ],
 )
 async def recall_history(args: RecallHistoryArgs, ctx: ToolContext) -> dict:
     if ctx.archive is None:

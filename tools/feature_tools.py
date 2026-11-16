@@ -85,6 +85,8 @@ def _service_error_text(value: Any, prefixes: tuple[str, ...]) -> str:
     args_model=DescribeImageArgs,
     category="feature",
     feature="vision",
+    search_tags=["图片", "识图", "看图", "OCR", "image", "vision", "describe", "截图"],
+    concurrency_safe=True,
 )
 async def describe_image(args: DescribeImageArgs, ctx: ToolContext) -> dict:
     vision = ctx.vision or ctx.main_vision
@@ -395,6 +397,8 @@ def _hashed_desc_name(value: str) -> str:
     args_model=WebSearchArgs,
     category="feature",
     feature="web_search",
+    search_tags=["搜索", "联网", "查资料", "新闻", "search", "web", "internet"],
+    concurrency_safe=True,
 )
 async def web_search(args: WebSearchArgs, ctx: ToolContext) -> dict:
     if ctx.web_search is None:
@@ -449,6 +453,8 @@ async def web_search(args: WebSearchArgs, ctx: ToolContext) -> dict:
     args_model=WebFetchArgs,
     category="feature",
     feature="web_search",
+    search_tags=["网页", "抓取", "正文", "fetch", "url", "网页内容"],
+    concurrency_safe=True,
 )
 async def web_fetch(args: WebFetchArgs, ctx: ToolContext) -> dict:
     if ctx.web_fetch is None:
@@ -496,6 +502,8 @@ async def web_fetch(args: WebFetchArgs, ctx: ToolContext) -> dict:
     args_model=GetWeatherArgs,
     category="feature",
     feature="weather",
+    search_tags=["天气", "气温", "下雨", "预报", "weather", "forecast"],
+    concurrency_safe=True,
 )
 async def get_weather(args: GetWeatherArgs, ctx: ToolContext) -> dict:
     if ctx.weather is None:
@@ -556,6 +564,7 @@ async def get_weather(args: GetWeatherArgs, ctx: ToolContext) -> dict:
     args_model=SendVoiceMessageArgs,
     category="feature",
     feature="tts",
+    search_tags=["语音", "发语音", "TTS", "voice", "audio"],
 )
 async def send_voice_message(args: SendVoiceMessageArgs, ctx: ToolContext) -> dict:
     if ctx.tts is None:
@@ -599,7 +608,7 @@ async def send_voice_message(args: SendVoiceMessageArgs, ctx: ToolContext) -> di
             "send_voice_message",
             metadata={
                 "ignore_review_interrupts": args.ignore_review_interrupts,
-                "tool_call_id": str(ctx.extras.get("tool_call_id") or ""),
+                "tool_call_id": str(ctx.tool_call_id or ""),
             },
         )
 

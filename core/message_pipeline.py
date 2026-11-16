@@ -66,6 +66,7 @@ from tools import (
     ToolRegistry,
     ToolsetSession,
 )
+from tools.base import DynamicConcurrencySafeNames
 from utils import get_time
 from utils.image_budget import resolve_image_budget_profile
 from utils.image_contracts import (
@@ -522,6 +523,20 @@ class MessagePipeline(
             inner = registry.get_executor(ctx)
             return await inner(tool_name, raw_args, tool_call_id=tool_call_id)
 
+        def _safe_names() -> frozenset[str]:
+            # 工作模式可能在中途切换 registry；每次读取时现算，避免把
+            # 构造时的旧集合冻结在包装层上。
+            names: set[str] = set()
+            for registry in (
+                self.tool_registry,
+                getattr(self, "_tool_profile_grace_registry", None),
+            ):
+                resolver = getattr(registry, "concurrency_safe_names", None)
+                if callable(resolver):
+                    names.update(resolver())
+            return frozenset(names)
+
+        executor.concurrency_safe_names = DynamicConcurrencySafeNames(_safe_names)  # type: ignore[attr-defined]
         return executor
 
     def _tool_schemas_for(self, session: ToolsetSession | None):

@@ -24,6 +24,14 @@ logger = logging.getLogger(__name__)
     args_model=SaveMemoryArgs,
     category="memory",
     no_feedback=True,
+    search_tags=["记忆", "记住", "保存", "memory", "remember", "save"],
+    examples=[
+        {
+            "memory_text": "张三的生日是7月8日。",
+            "scope": "user:123456",
+            "pinned": False,
+        }
+    ],
 )
 async def save_important_memory(args: SaveMemoryArgs, ctx: ToolContext) -> dict:
     if ctx.important is None:
@@ -79,6 +87,14 @@ async def save_important_memory(args: SaveMemoryArgs, ctx: ToolContext) -> dict:
     args_model=UpdateMemoryArgs,
     category="memory",
     no_feedback=True,
+    search_tags=["记忆", "更新", "修改", "memory", "update"],
+    examples=[
+        {
+            "memory_id": "mem_abc123",
+            "memory_text": "张三的生日是7月9日（原记录7月8日有误）。",
+            "scope": "user:123456",
+        }
+    ],
 )
 async def update_important_memory(args: UpdateMemoryArgs, ctx: ToolContext) -> dict:
     if ctx.important is None:
@@ -221,6 +237,7 @@ def _scope_retry_error(
     args_model=DeleteMemoryArgs,
     category="memory",
     no_feedback=True,
+    search_tags=["记忆", "删除", "忘记", "memory", "delete", "forget"],
 )
 async def delete_important_memory(args: DeleteMemoryArgs, ctx: ToolContext) -> dict:
     if ctx.important is None:

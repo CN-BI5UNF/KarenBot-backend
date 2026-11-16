@@ -82,6 +82,44 @@ class PipelineTaskContextMixin:
         # 也让稳定前缀和后续历史更容易命中 KV cache。
         return "\n".join(parts)
 
+    def _group_trigger_call_prefix(self, conversation_id: str | None) -> str:
+        """返回调用 group_trigger_window 前的动作前缀。
+
+        compact/full 下该工具是常驻紧凑 schema（参数已可见），routed 下属于
+        核心工具集；只有 agent 档位在未加载时才需要先 tool_search。硬编码
+        “先 tool_search”会让前两种模式白多一轮调用。
+        """
+        registry = getattr(self, "tool_registry", None)
+        get_spec = getattr(registry, "get_spec", None)
+        spec = get_spec("group_trigger_window") if callable(get_spec) else None
+        if spec is None:
+            return "先 tool_search 查询 group_trigger_window 的参数，再调用 "
+        profile = str(getattr(registry, "schema_profile", "compact"))
+        if profile == "agent":
+            session = None
+            sessions = getattr(self, "_toolset_sessions", None)
+            if isinstance(sessions, dict) and conversation_id:
+                session = sessions.get(conversation_id)
+            loaded = set(getattr(session, "loaded_tools", set()) or set())
+            if "group_trigger_window" not in loaded:
+                return '先 tool_search select=["group_trigger_window"] 加载 schema，再调用 '
+            return "调用 "
+        if profile == "routed":
+            session = None
+            sessions = getattr(self, "_toolset_sessions", None)
+            if isinstance(sessions, dict) and conversation_id:
+                session = sessions.get(conversation_id)
+            try:
+                routed_names = set(registry.routed_tool_names(session))
+            except Exception:
+                routed_names = set()
+            if "group_trigger_window" not in routed_names:
+                return "先 load_toolset 加载 group_trigger_window 所在工具集，再调用 "
+            return "调用 "
+        if str(getattr(spec, "schema_mode", "")).lower() == "stub":
+            return "先 tool_search 查询参数，再调用 "
+        return "调用 "
+
     def _group_trigger_context_hint(self, conversation_id: str | None) -> str:
         manager = getattr(self, "group_trigger", None)
         if manager is None or not getattr(manager, "enabled", False):
@@ -95,11 +133,12 @@ class PipelineTaskContextMixin:
         snapshot = manager.context_snapshot(group_id)
         if not snapshot:
             return ""
+        call_prefix = self._group_trigger_call_prefix(conversation_id)
         if not snapshot.get("active"):
             if snapshot.get("closed_after"):
                 text = (
                     f"群聊 @ 触发窗口刚刚用完（群 {group_id}）。如果仍需接收本群"
-                    f"普通消息，先 tool_search 查询参数，再调用 group_trigger_window "
+                    f"普通消息，{call_prefix}group_trigger_window "
                     f"action=open group_ids=[{group_id}] duration_minutes=...；最多同时临时"
                     "放行 2 个群。"
                 )
@@ -123,8 +162,8 @@ class PipelineTaskContextMixin:
         text = f"群聊接收窗口（群 {group_id}，{source}）：{detail}。"
         if snapshot.get("near_limit"):
             text += (
-                "窗口即将结束；如果需要继续接收，先 tool_search 查询参数，再调用 "
-                f"group_trigger_window action=extend group_ids=[{group_id}] "
+                "窗口即将结束；如果需要继续接收，"
+                f"{call_prefix}group_trigger_window action=extend group_ids=[{group_id}] "
                 "duration_minutes=...。"
             )
         cached = int(snapshot.get("cached_messages") or 0)
@@ -133,10 +172,10 @@ class PipelineTaskContextMixin:
             cap_hint = f"（缓存上限 {cache_cap} 条）" if cache_cap > 0 else ""
             text += (
                 f"本群另有 {cached} 条被 @ 触发过滤的近期消息保存在缓存中{cap_hint}；"
-                "需要回看时调用 group_trigger_window action=status "
+                f"需要回看时{call_prefix}group_trigger_window action=status "
                 f"group_ids=[{group_id}] history_limit=...，条数由你决定。"
             )
-        text += "也可以调用 group_trigger_window action=close 提前关闭。"
+        text += f"也可以{call_prefix}group_trigger_window action=close 提前关闭。"
         return text
 
     def _message_age_hint(self, conversation_id: str) -> str:

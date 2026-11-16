@@ -22,6 +22,7 @@ _POKE_COOLDOWN_SECONDS = 30.0
     ),
     args_model=GetMsgArgs,
     category="platform",
+    search_tags=["消息", "详情", "msg", "message", "detail"],
 )
 async def get_msg(args: GetMsgArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
@@ -60,6 +61,7 @@ async def get_msg(args: GetMsgArgs, ctx: ToolContext) -> dict:
     args_model=SendPokeArgs,
     category="platform",
     no_feedback=True,
+    search_tags=["戳一戳", "拍一拍", "poke", "戳"],
 )
 async def send_poke(args: SendPokeArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
@@ -109,6 +111,7 @@ async def send_poke(args: SendPokeArgs, ctx: ToolContext) -> dict:
     args_model=SetMsgEmojiLikeArgs,
     category="platform",
     no_feedback=True,
+    search_tags=["表情回应", "点赞", "reaction", "like", "emoji"],
 )
 async def set_msg_emoji_like(args: SetMsgEmojiLikeArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:

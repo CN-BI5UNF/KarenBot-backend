@@ -118,6 +118,7 @@ async def _persist(
     ),
     args_model=ListEmojiArgs,
     category="emoji",
+    search_tags=["表情", "表情包", "emoji", "sticker", "列表", "list"],
 )
 async def list_emoji(args: ListEmojiArgs, ctx: ToolContext) -> dict:
     try:
@@ -152,6 +153,7 @@ async def list_emoji(args: ListEmojiArgs, ctx: ToolContext) -> dict:
     ),
     args_model=SaveEmojiFromUrlArgs,
     category="emoji",
+    search_tags=["表情", "表情包", "保存", "下载", "emoji", "sticker", "url"],
 )
 async def save_emoji_from_url(args: SaveEmojiFromUrlArgs, ctx: ToolContext) -> dict:
     if ctx.emoji_dir is None:
@@ -192,6 +194,7 @@ async def save_emoji_from_url(args: SaveEmojiFromUrlArgs, ctx: ToolContext) -> d
     ),
     args_model=SaveEmojiFromWorkspaceArgs,
     category="emoji",
+    search_tags=["表情", "表情包", "保存", "workspace", "emoji", "sticker"],
 )
 async def save_emoji_from_workspace(
     args: SaveEmojiFromWorkspaceArgs,
@@ -236,6 +239,7 @@ async def save_emoji_from_workspace(
     description="给已有表情包改名。名称不带扩展名；新名称不能与现有名称重复。",
     args_model=RenameEmojiArgs,
     category="emoji",
+    search_tags=["表情", "改名", "重命名", "emoji", "rename"],
 )
 async def rename_emoji(args: RenameEmojiArgs, ctx: ToolContext) -> dict:
     try:
@@ -264,6 +268,7 @@ async def rename_emoji(args: RenameEmojiArgs, ctx: ToolContext) -> dict:
     ),
     args_model=DeleteEmojiArgs,
     category="emoji",
+    search_tags=["表情", "删除", "emoji", "delete", "remove"],
 )
 async def delete_emoji(args: DeleteEmojiArgs, ctx: ToolContext) -> dict:
     try:

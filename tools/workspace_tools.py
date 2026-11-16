@@ -102,11 +102,14 @@ def _line_preview(
     description=(
         "读取 workspace 内的文件内容。支持 UTF-8 文本，以及常见文档的文本抽取"
         "（PDF/DOCX/XLSX）。收到消息里的 workspace= 路径时优先用这个工具查看内容；"
+        "日常聊天看文档/小笔记用本工具，编码源码请用 agent_read（带行号）。"
         "不要尝试读取 workspace 之外的用户本机路径。"
     ),
     args_model=ReadFileArgs,
     category="workspace",
+    search_tags=["文件", "读取", "文档", "read", "file", "pdf", "docx"],
     examples=[{"path": "incoming/question.pdf", "max_bytes": 12000}],
+    concurrency_safe=True,
 )
 async def read_file(args: ReadFileArgs, ctx: ToolContext) -> dict:
     try:
@@ -394,6 +397,7 @@ def _xlsx_cell_text(cell: ElementTree.Element, shared: list[str], ns: dict[str, 
     ),
     args_model=WriteFileArgs,
     category="workspace",
+    search_tags=["文件", "写入", "创建", "write", "file", "save"],
     examples=[{"path": "notes/todo.md", "content": "- 买牛奶\n- 修自行车"}],
 )
 async def write_file(args: WriteFileArgs, ctx: ToolContext) -> dict:
@@ -430,6 +434,7 @@ async def write_file(args: WriteFileArgs, ctx: ToolContext) -> dict:
     ),
     args_model=EditFileArgs,
     category="workspace",
+    search_tags=["文件", "编辑", "替换", "edit", "replace", "file"],
     examples=[
         {
             "path": "notes/todo.md",
@@ -487,7 +492,9 @@ async def edit_file(args: EditFileArgs, ctx: ToolContext) -> dict:
     ),
     args_model=ListFilesArgs,
     category="workspace",
+    search_tags=["文件", "列表", "目录", "list", "files", "glob"],
     examples=[{"path": ".", "pattern": "**/*.json"}],
+    concurrency_safe=True,
 )
 async def list_files(args: ListFilesArgs, ctx: ToolContext) -> dict:
     try:
@@ -564,6 +571,7 @@ async def list_files(args: ListFilesArgs, ctx: ToolContext) -> dict:
     ),
     args_model=DeleteFileArgs,
     category="workspace",
+    search_tags=["文件", "删除", "delete", "file", "remove"],
 )
 async def delete_file(args: DeleteFileArgs, ctx: ToolContext) -> dict:
     try:
@@ -718,6 +726,7 @@ def _bwrap_command(
     ),
     args_model=RunPythonArgs,
     category="workspace",
+    search_tags=["python", "代码", "执行", "run", "script", "计算"],
     examples=[{"code": "print(sum(range(10)))", "timeout_seconds": 30}],
 )
 async def run_python(args: RunPythonArgs, ctx: ToolContext) -> dict:

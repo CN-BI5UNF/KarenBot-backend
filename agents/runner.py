@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -37,6 +38,7 @@ from providers.base import (
     normalize_messages,
     safe_provider_error_text,
 )
+from tools.base import executor_concurrency_safe_names, is_stub_schema_parameters
 from utils.image_budget import assert_wire_request_fits
 from utils.image_contracts import (
     ImageAssetError,
@@ -1043,18 +1045,34 @@ class AgentRunner:
         runtime_event_callback: RuntimeEventCallback | None = None,
         loop: int | None = None,
     ) -> list[dict[str, Any]]:
+        """执行一轮工具调用。
+
+        连续一组 ``concurrency_safe`` 只读工具会并发执行；任何有状态/写操作
+        工具都是屏障，保证它前后的工具仍按原顺序执行。结果列表始终按模型给出
+        的 tool_call 顺序返回。
+        """
         results: list[dict[str, Any]] = []
-        for step, tc in enumerate(tool_calls, start=1):
-            name = tc.name
+        safe_names = executor_concurrency_safe_names(executor)
+        parsed: list[tuple[ToolCall, dict[str, Any], Exception | None]] = []
+        for tc in tool_calls:
             try:
                 args = json.loads(tc.arguments) if tc.arguments else {}
                 if not isinstance(args, dict):
                     raise ValueError(f"工具参数必须是对象: {tc.arguments!r}")
             except (json.JSONDecodeError, ValueError) as e:
+                parsed.append((tc, {}, e))
+            else:
+                parsed.append((tc, args, None))
+
+        index = 0
+        while index < len(parsed):
+            tc, args, parse_error = parsed[index]
+            step = index + 1
+            if parse_error is not None:
                 result = _build_runner_tool_error_result(
-                    name,
+                    tc.name,
                     brief="工具参数解析失败。",
-                    error=f"参数解析失败: {e}",
+                    error=f"参数解析失败: {parse_error}",
                 )
                 await self._emit_runtime_event(
                     runtime_event_callback,
@@ -1062,42 +1080,78 @@ class AgentRunner:
                         tc,
                         args=None,
                         result=result,
-                        error_type=type(e).__name__,
+                        error_type=type(parse_error).__name__,
                         loop=loop,
                         step=step,
                     ),
                 )
-                results.append({"id": tc.id, "name": name, "args": {}, "result": result})
+                results.append(
+                    {"id": tc.id, "name": tc.name, "args": {}, "result": result}
+                )
+                index += 1
                 continue
+
+            if tc.name in safe_names:
+                batch: list[tuple[ToolCall, dict[str, Any], int]] = [(tc, args, step)]
+                next_index = index + 1
+                while next_index < len(parsed):
+                    next_tc, next_args, next_error = parsed[next_index]
+                    if next_error is not None or next_tc.name not in safe_names:
+                        break
+                    batch.append((next_tc, next_args, next_index + 1))
+                    next_index += 1
+                if len(batch) > 1:
+                    for batch_tc, batch_args, batch_step in batch:
+                        await self._emit_runtime_event(
+                            runtime_event_callback,
+                            _build_tool_started_event(
+                                batch_tc,
+                                batch_args,
+                                loop=loop,
+                                step=batch_step,
+                            ),
+                        )
+                    outcomes = await asyncio.gather(
+                        *(
+                            self._invoke_tool(executor, batch_tc, batch_args)
+                            for batch_tc, batch_args, _ in batch
+                        )
+                    )
+                    for (batch_tc, batch_args, batch_step), (
+                        result,
+                        error_type,
+                    ) in zip(batch, outcomes, strict=True):
+                        result = self._maybe_mark_turn_completion(
+                            batch_tc.name, batch_args, result
+                        )
+                        await self._emit_runtime_event(
+                            runtime_event_callback,
+                            _build_tool_result_event(
+                                batch_tc,
+                                args=batch_args,
+                                result=result,
+                                error_type=error_type,
+                                loop=loop,
+                                step=batch_step,
+                            ),
+                        )
+                        results.append(
+                            {
+                                "id": batch_tc.id,
+                                "name": batch_tc.name,
+                                "args": batch_args,
+                                "result": result,
+                            }
+                        )
+                    index = next_index
+                    continue
 
             await self._emit_runtime_event(
                 runtime_event_callback,
                 _build_tool_started_event(tc, args, loop=loop, step=step),
             )
-            try:
-                if _executor_accepts_tool_call_id(executor):
-                    result = await executor(name, args, tool_call_id=tc.id)
-                else:
-                    result = await executor(name, args)
-                if not isinstance(result, dict):
-                    result = {"ok": True, "value": result}
-            except Exception as e:
-                logger.error(
-                    "工具 %s 执行失败（type=%s）：%s",
-                    name,
-                    type(e).__name__,
-                    safe_provider_error_text(e),
-                )
-                result = _build_runner_tool_error_result(
-                    name,
-                    brief="工具执行失败。",
-                    error=str(e),
-                )
-                error_type = type(e).__name__
-            else:
-                error_type = None
-
-            result = self._maybe_mark_turn_completion(name, args, result)
+            result, error_type = await self._invoke_tool(executor, tc, args)
+            result = self._maybe_mark_turn_completion(tc.name, args, result)
             await self._emit_runtime_event(
                 runtime_event_callback,
                 _build_tool_result_event(
@@ -1109,8 +1163,40 @@ class AgentRunner:
                     step=step,
                 ),
             )
-            results.append({"id": tc.id, "name": name, "args": args, "result": result})
+            results.append(
+                {"id": tc.id, "name": tc.name, "args": args, "result": result}
+            )
+            index += 1
         return results
+
+    async def _invoke_tool(
+        self,
+        executor: ToolExecutor,
+        tc: ToolCall,
+        args: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        """调用一次 executor，统一异常兜底；不发射事件。"""
+        try:
+            if _executor_accepts_tool_call_id(executor):
+                result = await executor(tc.name, args, tool_call_id=tc.id)
+            else:
+                result = await executor(tc.name, args)
+            if not isinstance(result, dict):
+                result = {"ok": True, "value": result}
+        except Exception as e:
+            logger.error(
+                "工具 %s 执行失败（type=%s）：%s",
+                tc.name,
+                type(e).__name__,
+                safe_provider_error_text(e),
+            )
+            result = _build_runner_tool_error_result(
+                tc.name,
+                brief="工具执行失败。",
+                error=str(e),
+            )
+            return result, type(e).__name__
+        return result, None
 
     @staticmethod
     async def _emit_runtime_event(
@@ -1698,8 +1784,7 @@ def _tools_diagnostics(
     for tool in tools:
         function = tool.get("function") if isinstance(tool, dict) else None
         parameters = function.get("parameters") if isinstance(function, dict) else None
-        properties = parameters.get("properties") if isinstance(parameters, dict) else None
-        if isinstance(properties, dict) and "_tool_search_required" in properties:
+        if is_stub_schema_parameters(parameters):
             stub += 1
         else:
             full += 1
@@ -1873,8 +1958,7 @@ def _tool_schema_mode_counts(tools: list[dict[str, Any]]) -> dict[str, int]:
     for tool in tools:
         function = tool.get("function") if isinstance(tool, dict) else None
         parameters = function.get("parameters") if isinstance(function, dict) else None
-        properties = parameters.get("properties") if isinstance(parameters, dict) else None
-        if isinstance(properties, dict) and "_tool_search_required" in properties:
+        if is_stub_schema_parameters(parameters):
             counts["stub"] += 1
         else:
             counts["full"] += 1

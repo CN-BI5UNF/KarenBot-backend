@@ -14,12 +14,94 @@ from typing import Any
 
 from adapters.types import Target
 from agents import build_messages
+from tools.base import copy_executor_metadata
 from utils import get_time
 from utils.request_history import partition_request_history
 
 from .pipeline_context import _earliest_record_ts, _filter_tool_schemas
 
 logger = logging.getLogger(__name__)
+
+
+def _wrap_turn_executor(
+    executor: Any,
+    *,
+    denied_tools: set[str],
+    ledger: Any,
+    persona_id: str,
+    current_turn_id: str,
+) -> Any:
+    """给本轮 executor 加 deny 守卫和 action_ledger 记录。
+
+    两个包装层都必须保留底层 executor 的 ``concurrency_safe_names``，否则
+    AgentRunner 在真实聊天路径上永远读不到并发安全集合。
+    """
+    if denied_tools:
+        base_executor = executor
+
+        async def _guarded_executor(
+            tool_name: str,
+            args: dict[str, Any],
+            *,
+            tool_call_id: str | None = None,
+        ) -> dict[str, Any]:
+            if tool_name in denied_tools:
+                return {
+                    "ok": False,
+                    "status": "denied",
+                    "error": f"本轮系统事件不允许调用工具 {tool_name}",
+                    "next": "只处理当前系统事件；如无需行动请调用 no_action。",
+                }
+            return await base_executor(tool_name, args, tool_call_id=tool_call_id)
+
+        executor = copy_executor_metadata(_guarded_executor, base_executor)
+
+    underlying_executor = executor
+
+    async def _ledger_tracked_executor(
+        tool_name: str,
+        args: dict[str, Any],
+        *,
+        tool_call_id: str | None = None,
+    ) -> dict[str, Any]:
+        aid = tool_call_id or f"act_{tool_name}_{int(time.time() * 1000)}"
+        if ledger is not None:
+            try:
+                ledger.prepare_action(
+                    persona_id,
+                    aid,
+                    turn_id=current_turn_id,
+                    tool_name=tool_name,
+                    args_summary=str(args),
+                )
+                ledger.start_action(persona_id, aid)
+            except Exception:
+                pass
+        try:
+            res = await underlying_executor(tool_name, args, tool_call_id=tool_call_id)
+            if ledger is not None:
+                try:
+                    ledger.commit_action_result(
+                        persona_id,
+                        aid,
+                        receipt={
+                            "tool_name": tool_name,
+                            "ok": bool(res.get("ok", True)) if isinstance(res, dict) else True,
+                        },
+                    )
+                except Exception:
+                    pass
+            return res
+        except BaseException as e:
+            if ledger is not None:
+                try:
+                    ledger.mark_action_unknown(persona_id, aid, error_detail=str(e))
+                except Exception:
+                    pass
+            raise
+
+    return copy_executor_metadata(_ledger_tracked_executor, underlying_executor)
+
 
 _OUT_OF_BAND_DENIED_TOOLS = frozenset(
     {
@@ -311,75 +393,14 @@ class PipelineTurnsMixin:
             ),
             denied_tools,
         )
-        if denied_tools:
-            base_executor = executor
-
-            async def _guarded_executor(
-                tool_name: str,
-                args: dict[str, Any],
-                *,
-                tool_call_id: str | None = None,
-            ) -> dict[str, Any]:
-                if tool_name in denied_tools:
-                    return {
-                        "ok": False,
-                        "status": "denied",
-                        "error": f"本轮系统事件不允许调用工具 {tool_name}",
-                        "next": "只处理当前系统事件；如无需行动请调用 no_action。",
-                    }
-                return await base_executor(tool_name, args, tool_call_id=tool_call_id)
-
-            executor = _guarded_executor
-
         # S03: 接入 action_ledger 状态机（prepared -> started -> result_committed / unknown）
-        ledger = getattr(self, "action_ledger", None)
-        persona_id = getattr(self, "persona_id", "default")
-        current_turn_id = f"turn_{int(time.time() * 1000)}"
-        underlying_executor = executor
-
-        async def _ledger_tracked_executor(
-            tool_name: str,
-            args: dict[str, Any],
-            *,
-            tool_call_id: str | None = None,
-        ) -> dict[str, Any]:
-            aid = tool_call_id or f"act_{tool_name}_{int(time.time() * 1000)}"
-            if ledger is not None:
-                try:
-                    ledger.prepare_action(
-                        persona_id,
-                        aid,
-                        turn_id=current_turn_id,
-                        tool_name=tool_name,
-                        args_summary=str(args),
-                    )
-                    ledger.start_action(persona_id, aid)
-                except Exception:
-                    pass
-            try:
-                res = await underlying_executor(tool_name, args, tool_call_id=tool_call_id)
-                if ledger is not None:
-                    try:
-                        ledger.commit_action_result(
-                            persona_id,
-                            aid,
-                            receipt={
-                                "tool_name": tool_name,
-                                "ok": bool(res.get("ok", True)) if isinstance(res, dict) else True,
-                            },
-                        )
-                    except Exception:
-                        pass
-                return res
-            except BaseException as e:
-                if ledger is not None:
-                    try:
-                        ledger.mark_action_unknown(persona_id, aid, error_detail=str(e))
-                    except Exception:
-                        pass
-                raise
-
-        executor = _ledger_tracked_executor
+        executor = _wrap_turn_executor(
+            executor,
+            denied_tools=denied_tools,
+            ledger=getattr(self, "action_ledger", None),
+            persona_id=getattr(self, "persona_id", "default"),
+            current_turn_id=f"turn_{int(time.time() * 1000)}",
+        )
 
         async def _rebuild_messages() -> list[dict[str, Any]]:
             member_qqs: set[int] | None = None

@@ -216,6 +216,10 @@ COMPACT_SCHEMA_TOOLS: set[str] = {
     "tool_search",
     "container",
     "work",
+    # task_context 会在 @ 触发窗口快结束时直接提示调用；它必须与 routed
+    # 模式一样常驻紧凑 schema，否则 compact 模式会退化成“先 tool_search”
+    # 的多余一轮。
+    "group_trigger_window",
 }
 """compact profile 下直接暴露核心字段的工具。
 
@@ -247,28 +251,25 @@ _COMPACT_SHORT_DESCRIPTIONS: dict[str, str] = {
 
 
 _COMPACT_HIDDEN_FIELDS: dict[str, list[str]] = {
+    # reply_to_message_id 与 reviewed_until_seq 是发送/复核链路的高频核心
+    # 参数，不能藏在 compact 模式之外：needs_review 后重发、引用回复、
+    # commit_send_attempt 都依赖它们。只隐藏真正的低频策略覆写字段。
     "send_private_messages": [
-        "reviewed_until_seq",
         "review_policy",
         "delivery_interrupt_policy",
         "ignore_review_interrupts",
         "responding_to_message_ids",
-        "reply_to_message_id",
         "reason",
     ],
     "send_group_message": [
-        "reviewed_until_seq",
         "review_policy",
         "delivery_interrupt_policy",
         "ignore_review_interrupts",
         "responding_to_message_ids",
-        "reply_to_message_id",
         "reason",
     ],
     "commit_send_attempt": [
-        "reviewed_until_seq",
         "delivery_interrupt_policy",
-        "reply_to_message_id",
         "ignore_review_interrupts",
         "reason",
     ],
@@ -378,7 +379,7 @@ _STUB_SHORT_DESCRIPTIONS: dict[str, str] = {
     "set_group_whole_ban": "高风险：开启/关闭全员禁言。",
     "set_group_leave": "高风险：让机器人退出当前群。",
     "schedule_wakeup": "延迟唤醒自己或到点发送消息。",
-    "read_file": "读取 workspace 文本文件，可分页。",
+    "read_file": "读取 workspace 文件（文本/PDF/DOCX/XLSX 抽取），可分页；编码源码用 agent_read。",
     "write_file": "创建或覆盖 workspace 文本文件。",
     "edit_file": "按唯一字符串替换文件内容。",
     "list_files": "列出 workspace 文件，支持 glob。",
@@ -408,7 +409,7 @@ _STUB_SHORT_DESCRIPTIONS: dict[str, str] = {
     "web_fetch": "读取单个公开网页的正文。",
     "chat_selection": "暂停、恢复或限定群聊接收范围。",
     "group_trigger_window": "打开、延长或关闭群聊 @ 触发窗口。",
-    "agent_read": "读取本机或容器文件并返回带行号的文本。",
+    "agent_read": "编码专用：读取本机/容器源码并返回带行号文本（读文档用 read_file）。",
     "agent_write": "创建或覆盖本机/容器文本文件。",
     "agent_edit": "用精确字符串替换本机/容器文件内容。",
     "agent_apply_patch": "应用 unified diff 补丁，支持多文件新建/修改/删除。",
@@ -542,6 +543,9 @@ def build_default_registry(
                     _COMPACT_HIDDEN_FIELDS.get(spec.name, [])
                 ),
                 risk_level=_STUB_RISK_LEVELS.get(spec.name, spec.risk_level),
+                # routed/agent 也走 tool_search 发现；没有手工标签时至少保留
+                # 分类和工具名，避免关键词召回比 compact/full 模式更差。
+                search_tags=list(spec.search_tags) or [spec.category, spec.name],
             )
         elif schema_profile == "full":
             # 旧行为：保留给回滚与对照测试。
@@ -566,6 +570,7 @@ def build_default_registry(
                 compact_hidden_fields=list(
                     _COMPACT_HIDDEN_FIELDS.get(spec.name, [])
                 ),
+                search_tags=list(spec.search_tags) or [spec.category, spec.name],
             )
         else:
             configured = replace(

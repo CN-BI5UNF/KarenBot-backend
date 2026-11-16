@@ -118,7 +118,7 @@ def _send_metadata_from_args(args: SendPrivateArgs | SendGroupArgs) -> dict:
 
 def _inject_context_tool_call_id(metadata: dict, ctx: ToolContext) -> dict:
     result = dict(metadata)
-    value = ctx.extras.get("tool_call_id")
+    value = ctx.tool_call_id
     if value:
         result["tool_call_id"] = str(value)
     else:
@@ -182,6 +182,7 @@ async def _send_action_direct(ctx: ToolContext, target: Target, action: dict) ->
     ),
     args_model=SendPrivateArgs,
     category="messaging",
+    search_tags=["私聊", "发送", "消息", "private", "dm", "send", "message"],
 )
 async def send_private_messages(args: SendPrivateArgs, ctx: ToolContext) -> dict:
     """按 order 即时发送私聊消息，返回每条真实 msg_id。"""
@@ -299,6 +300,7 @@ async def send_private_messages(args: SendPrivateArgs, ctx: ToolContext) -> dict
     ),
     args_model=SendGroupArgs,
     category="messaging",
+    search_tags=["群聊", "发送", "消息", "group", "send", "message"],
 )
 async def send_group_message(args: SendGroupArgs, ctx: ToolContext) -> dict:
     """按 order 即时发送群消息，返回每条真实 msg_id。"""
@@ -404,6 +406,7 @@ async def send_group_message(args: SendGroupArgs, ctx: ToolContext) -> dict:
     ),
     args_model=CommitSendAttemptArgs,
     category="messaging",
+    search_tags=["发送", "复核", "提交", "commit", "review", "send_attempt"],
 )
 async def commit_send_attempt(args: CommitSendAttemptArgs, ctx: ToolContext) -> dict:
     if ctx.send_actions_cb is None:
@@ -422,7 +425,7 @@ async def commit_send_attempt(args: CommitSendAttemptArgs, ctx: ToolContext) -> 
             "reply_to_message_id": args.reply_to_message_id,
             "ignore_review_interrupts": args.ignore_review_interrupts,
             "reason": args.reason,
-            "tool_call_id": str(ctx.extras.get("tool_call_id") or ""),
+            "tool_call_id": str(ctx.tool_call_id or ""),
         },
     )
 
@@ -437,6 +440,7 @@ async def commit_send_attempt(args: CommitSendAttemptArgs, ctx: ToolContext) -> 
     description="撤回已发送的消息。仅可撤回 2 分钟内发出的消息。",
     args_model=RecallMessageArgs,
     category="messaging",
+    search_tags=["撤回", "消息", "recall", "撤销"],
 )
 async def recall_message(args: RecallMessageArgs, ctx: ToolContext) -> dict:
     """直接调用 adapter.recall。"""
@@ -480,6 +484,7 @@ async def recall_message(args: RecallMessageArgs, ctx: ToolContext) -> dict:
     ),
     args_model=UploadFileArgs,
     category="messaging",
+    search_tags=["文件", "上传", "发送文件", "upload", "file", "send"],
     examples=[
         {
             "target_type": "group",

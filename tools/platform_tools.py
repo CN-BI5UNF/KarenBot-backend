@@ -100,6 +100,8 @@ def _to_dict(obj) -> dict:
     ),
     args_model=ListContactsArgs,
     category="platform",
+    search_tags=["联系人", "好友", "群", "成员", "contacts", "friends", "groups", "members"],
+    examples=[{"scope": "groups"}],
 )
 async def list_contacts(args: ListContactsArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
@@ -227,6 +229,7 @@ def _paged_contacts_result(
     description="获取指定 QQ 用户的公开信息（昵称、性别、年龄等）。用于了解陌生人或新成员。",
     args_model=GetUserInfoArgs,
     category="platform",
+    search_tags=["用户", "资料", "QQ", "user", "info", "profile"],
 )
 async def get_user_info(args: GetUserInfoArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
@@ -297,6 +300,8 @@ def _public_user_info(info: dict) -> dict:
     ),
     args_model=GetForwardMsgArgs,
     category="platform",
+    search_tags=["合并转发", "转发", "forward", "聊天记录", "expand"],
+    examples=[{"forward_id": "123456", "recursive": True, "output": "auto"}],
 )
 async def get_forward_msg(args: GetForwardMsgArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
@@ -371,6 +376,8 @@ async def get_forward_msg(args: GetForwardMsgArgs, ctx: ToolContext) -> dict:
     ),
     args_model=GetRecentChatMessagesArgs,
     category="platform",
+    search_tags=["聊天记录", "最近消息", "上下文", "recent", "chat", "messages", "history"],
+    examples=[{"limit": 50}],
 )
 async def get_recent_chat_messages(
     args: GetRecentChatMessagesArgs,
@@ -495,6 +502,7 @@ def _write_chat_timeline_artifact(
     args_model=SetFriendRequestArgs,
     category="platform",
     no_feedback=True,
+    search_tags=["好友", "验证", "加好友", "friend", "request", "approve"],
 )
 async def set_friend_add_request(args: SetFriendRequestArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
@@ -599,6 +607,7 @@ def _inject_friend_whitelist(ctx: ToolContext, user_id: str) -> None:
     args_model=SetGroupRequestArgs,
     category="platform",
     no_feedback=True,
+    search_tags=["加群", "邀请", "验证", "group", "request", "approve"],
 )
 async def set_group_add_request(args: SetGroupRequestArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
@@ -664,6 +673,13 @@ _DEFAULT_SUMMARIZE_PROMPT = (
     ),
     args_model=SummarizeChatArgs,
     category="platform",
+    search_tags=["总结", "群历史", "聊天记录", "summarize", "history", "summary"],
+    examples=[
+        {
+            "group_id": 123456,
+            "custom_prompt": "总结今天的讨论结论、分歧和待办事项。",
+        }
+    ],
 )
 async def summarize_chat_history(args: SummarizeChatArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
@@ -721,6 +737,14 @@ _DEFAULT_LOCAL_SUMMARY_GOAL = (
     ),
     args_model=SummarizeConversationArgs,
     category="platform",
+    search_tags=["总结", "对话", "聊天记录", "summarize", "conversation", "summary"],
+    examples=[
+        {
+            "conversation_id": "group:123456",
+            "range_hint": "昨晚",
+            "goal": "总结讨论结论、人物偏好和未完成事项。",
+        }
+    ],
 )
 async def summarize_conversation(args: SummarizeConversationArgs, ctx: ToolContext) -> dict:
     if ctx.archive is None:

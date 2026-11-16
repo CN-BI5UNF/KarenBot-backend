@@ -33,6 +33,7 @@ _GROUP_ROLE_CACHE_TTL_SECONDS = 300.0
     ),
     args_model=GetGroupSelfRoleArgs,
     category="platform",
+    search_tags=["群", "权限", "身份", "管理员", "role", "permission"],
 )
 async def get_group_self_role(args: GetGroupSelfRoleArgs, ctx: ToolContext) -> dict:
     group_id = _resolve_group_id(args.group_id, ctx)
@@ -60,6 +61,7 @@ async def get_group_self_role(args: GetGroupSelfRoleArgs, ctx: ToolContext) -> d
     ),
     args_model=SetGroupKickArgs,
     category="platform",
+    search_tags=["踢人", "移出群", "kick", "群管理", "remove"],
 )
 async def set_group_kick(args: SetGroupKickArgs, ctx: ToolContext) -> dict:
     group_id = str(args.group_id)
@@ -94,6 +96,7 @@ async def set_group_kick(args: SetGroupKickArgs, ctx: ToolContext) -> dict:
     ),
     args_model=SetGroupBanArgs,
     category="platform",
+    search_tags=["禁言", "mute", "ban", "群管理", "闭嘴"],
 )
 async def set_group_ban(args: SetGroupBanArgs, ctx: ToolContext) -> dict:
     group_id = str(args.group_id)
@@ -128,6 +131,7 @@ async def set_group_ban(args: SetGroupBanArgs, ctx: ToolContext) -> dict:
     ),
     args_model=SetGroupWholeBanArgs,
     category="platform",
+    search_tags=["全员禁言", "全体禁言", "whole ban", "mute all"],
 )
 async def set_group_whole_ban(args: SetGroupWholeBanArgs, ctx: ToolContext) -> dict:
     group_id = str(args.group_id)
@@ -157,6 +161,7 @@ async def set_group_whole_ban(args: SetGroupWholeBanArgs, ctx: ToolContext) -> d
     ),
     args_model=SetGroupLeaveArgs,
     category="platform",
+    search_tags=["退群", "离开群", "leave", "quit"],
 )
 async def set_group_leave(args: SetGroupLeaveArgs, ctx: ToolContext) -> dict:
     group_id = _resolve_group_id(args.group_id, ctx)

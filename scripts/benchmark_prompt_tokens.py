@@ -547,12 +547,15 @@ def main(argv: list[str] | None = None) -> int:
     compact_registry = build_default_registry(
         _fake_config("compact", args.memory_mode)
     )
+    from tools.base import is_stub_schema_parameters
+
     compact_schemas = compact_registry.get_schemas()
     compact_stub_count = sum(
         1
         for schema in compact_schemas
-        if "_tool_search_required"
-        in (schema.get("function", {}).get("parameters", {}).get("properties", {}))
+        if is_stub_schema_parameters(
+            schema.get("function", {}).get("parameters", {})
+        )
     )
 
     before_prompt = raw_tokens + system_tokens + full_tools_tokens
