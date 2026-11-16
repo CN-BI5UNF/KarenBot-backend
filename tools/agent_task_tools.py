@@ -64,6 +64,14 @@ _IMAGE_TASK_HINTS = (
     ),
     args_model=StartAgentTaskArgs,
     category="platform",
+    search_tags=["子agent", "整理", "资料", "长文", "agent", "task", "extract", "summarize"],
+    examples=[
+        {
+            "prompt": "提取这份合并转发里所有待办事项，输出 Markdown，并保留发送者和时间。",
+            "sources": [{"type": "forward_id", "value": "123456"}],
+            "output_format": "markdown",
+        }
+    ],
 )
 async def start_agent_task(args: StartAgentTaskArgs, ctx: ToolContext) -> dict:
     if ctx.agent_task_cb is None:

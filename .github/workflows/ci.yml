@@ -22,15 +22,21 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Install test dependencies
+      - name: Install project and test dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest packaging
+          python -m pip install -e ".[dev]"
+          # 可选性能依赖；安装后矩阵检索路径也会被测试覆盖。
+          python -m pip install numpy
 
-      - name: Compile backend
-        run: python -m compileall -q backend
+      - name: Compile backend and core packages
+        run: python -m compileall -q backend agents core memory mind providers tools
 
-      - name: Run module updater tests
+      - name: Lint core packages
+        run: python -m ruff check agents core memory mind providers tools tests
+
+      - name: Run test suite
         run: python -m pytest -q tests -k "not api_builds_module_service"
 
       - name: Verify module layout

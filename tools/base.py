@@ -29,8 +29,8 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Iterable, Iterator
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import (
@@ -245,6 +245,13 @@ class ToolContext:
     extras: dict[str, Any] = field(default_factory=dict)
     """业务方塞的额外数据（如 self_id 等），工具内部读取。"""
 
+    tool_call_id: str | None = None
+    """本次工具调用对应的模型 tool_call id。
+
+    由 ToolRegistry executor 在每次调用时通过 ``dataclasses.replace`` 派生到
+    独立上下文，避免并发执行时多个工具争写 ``extras["tool_call_id"]``。
+    """
+
 
 # ============================================================
 # ITool —— 工具自身的元信息载体
@@ -256,6 +263,38 @@ ArgsModelT = TypeVar("ArgsModelT", bound=BaseModel)
 
 ToolFunc = Callable[[Any, ToolContext], Awaitable[dict[str, Any]]]
 """工具实现函数签名。第一个参数是已校验的 Pydantic args 实例。"""
+
+
+class DynamicConcurrencySafeNames:
+    """Set-like view that resolves safe tool names on each iteration.
+
+    Used by the dynamic registry executor: work mode can swap the registry
+    mid-turn, so a frozen set captured at wrapper construction would be stale.
+    """
+
+    def __init__(self, resolver: Callable[[], Iterable[str]]) -> None:
+        self._resolver = resolver
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._resolver())
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._resolver()
+
+    def __len__(self) -> int:
+        return len(list(self._resolver()))
+
+
+def copy_executor_metadata(target: Any, source: Any) -> Any:
+    """把注册表 executor 的并发能力标记复制到包装层 executor。"""
+    names = getattr(source, "concurrency_safe_names", None)
+    if names is not None:
+        target.concurrency_safe_names = names
+    return target
+
+
+def executor_concurrency_safe_names(executor: Any) -> frozenset[str]:
+    return frozenset(getattr(executor, "concurrency_safe_names", ()) or ())
 
 
 @dataclass(slots=True)
@@ -306,6 +345,13 @@ class ToolSpec:
     examples: list[dict[str, Any]] = field(default_factory=list)
     """tool_search 返回的调用示例。"""
 
+    concurrency_safe: bool = False
+    """只读、无共享副作用的工具可标记为 True。
+
+    AgentRunner 只会把「连续一组」concurrency_safe 工具并发执行；遇到任何
+    有状态/写操作工具就设屏障，保持原有顺序语义。
+    """
+
     toolsets: list[str] = field(default_factory=list)
     """该工具所属的工具集 id（可重叠）；由 build_default_registry 填充。"""
 
@@ -353,24 +399,23 @@ class ToolSpec:
         }
 
     def to_stub_openai_schema(self) -> dict[str, Any]:
+        description = (
+            self.short_description
+            or f"{self.name} 是低频工具。调用前先用 tool_search 查询参数摘要和约束。"
+        )
+        if "tool_search" not in description:
+            description = f"{description.rstrip()} [需先tool_search]"
         return {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": (
-                    self.short_description
-                    or f"{self.name} 是低频工具。调用前先用 tool_search 查询参数摘要和约束。"
-                ),
+                "description": description,
+                # stub 的真实 schema 在执行前由 tool_search 解锁；不要再塞
+                # `_tool_search_required` 假参数，否则 40+ 个 stub 每轮重复
+                # 500+ tokens，还会诱导模型把它当业务参数。
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "_tool_search_required": {
-                            "type": "boolean",
-                            "description": (
-                                "占位参数；先 tool_search 查询参数。"
-                            ),
-                        }
-                    },
+                    "properties": {},
                     "additionalProperties": True,
                 },
             },
@@ -442,6 +487,7 @@ def tool(
     search_tags: list[str] | None = None,
     risk_level: Literal["low", "medium", "high"] = "low",
     examples: list[dict[str, Any]] | None = None,
+    concurrency_safe: bool = False,
 ) -> Callable[[ToolFunc], ToolFunc]:
     """把函数注册成工具的装饰器。
 
@@ -475,6 +521,7 @@ def tool(
             search_tags=list(search_tags or []),
             risk_level=risk_level,
             examples=list(examples or []),
+            concurrency_safe=concurrency_safe,
             toolsets=list(toolsets_for_tool(name)),
         )
         _DEFAULT_REGISTRY.append(spec)
@@ -609,6 +656,12 @@ class ToolRegistry:
         self._agent_schemas_cache[loaded] = schemas
         return schemas
 
+    def concurrency_safe_names(self) -> frozenset[str]:
+        """返回当前 registry 中可并发执行的只读工具名。"""
+        return frozenset(
+            spec.name for spec in self._specs.values() if spec.concurrency_safe
+        )
+
     def get_no_feedback_names(self) -> set[str]:
         """返回所有 no_feedback=True 的工具名。
 
@@ -711,22 +764,17 @@ class ToolRegistry:
                 )
 
             try:
-                old_tool_call_id = ctx.extras.get("tool_call_id")
-                if tool_call_id:
-                    ctx.extras["tool_call_id"] = tool_call_id
-                result = await spec.func(args, ctx)
+                # tool_call_id 通过独立字段传递，不再读写共享 extras，避免
+                # 并发执行时 save/restore 互相覆盖。extras 仍共享引用，工具
+                # 写入的缓存/审批集合在同一轮内保持可见。
+                call_ctx = replace(ctx, tool_call_id=tool_call_id) if tool_call_id else ctx
+                result = await spec.func(args, call_ctx)
             except Exception as e:
                 logger.exception(f"工具 {tool_name} 执行异常: {e}")
                 return _ensure_tool_result_envelope(
                     tool_name,
                     {"ok": False, "error": str(e)},
                 )
-            finally:
-                if tool_call_id:
-                    if old_tool_call_id is None:
-                        ctx.extras.pop("tool_call_id", None)
-                    else:
-                        ctx.extras["tool_call_id"] = old_tool_call_id
 
             if not isinstance(result, dict):
                 # 工具实现应统一返回 dict（含 ok 字段）；非 dict 兜底为成功，
@@ -741,7 +789,7 @@ class ToolRegistry:
 
             shrunk = shrink_tool_result(tool_name, result, ctx)
             shrunk = _ensure_tool_result_envelope(tool_name, shrunk)
-            if finish_after_success and not _tool_result_blocks_completion(shrunk):
+            if finish_after_success and not tool_result_blocks_completion(shrunk):
                 shrunk = dict(shrunk)
                 completion = dict(shrunk.get("turn_completion") or {})
                 completion["allowed"] = True
@@ -749,6 +797,9 @@ class ToolRegistry:
                 shrunk["turn_completion"] = completion
             return shrunk
 
+        # AgentRunner 通过该属性识别可并发执行的连续只读工具组；自定义
+        # executor 没有这个属性时保持完全串行。
+        executor.concurrency_safe_names = self.concurrency_safe_names()  # type: ignore[attr-defined]
         return executor
 
 
@@ -999,64 +1050,51 @@ def _hide_optional_properties(
     return patched
 
 
+def is_stub_schema_parameters(parameters: Any) -> bool:
+    """判断 OpenAI tool schema 的 parameters 是否为 stub 形态。
+
+    stub 的参数对象固定为空 properties + additionalProperties=true；不能再靠
+    已删除的 `_tool_search_required` 假参数识别。
+    """
+    if not isinstance(parameters, dict):
+        return False
+    properties = parameters.get("properties")
+    return (
+        isinstance(properties, dict)
+        and not properties
+        and parameters.get("additionalProperties") is True
+    )
+
+
+def _smart_truncate_text(text: str, limit: int) -> str:
+    """在 limit 内优先按句号/分号截断，避免产生半截残句。
+
+    只有分隔符位于窗口后半段时才采用，避免第一句过短（例如“资料来源列表。”）
+    导致关键细节全部丢失。
+    """
+    if len(text) <= limit:
+        return text
+    window = text[:limit]
+    for separator in ("。", "；", ". ", "; "):
+        index = window.rfind(separator)
+        if index >= limit // 2:
+            return window[: index + 1].rstrip()
+    return window.rstrip() + "…"
+
+
 def _truncate_schema_descriptions(node: Any, *, limit: int) -> Any:
-    """递归截断参数描述，保留类型/枚举/必填等结构信息。"""
+    """递归精简参数描述，保留类型/枚举/必填等结构信息。"""
     if isinstance(node, dict):
         result: dict[str, Any] = {}
         for key, value in node.items():
             if key == "description" and isinstance(value, str) and len(value) > limit:
-                result[key] = value[:limit].rstrip() + "…"
+                result[key] = _smart_truncate_text(value, limit)
             else:
                 result[key] = _truncate_schema_descriptions(value, limit=limit)
         return result
     if isinstance(node, list):
         return [_truncate_schema_descriptions(item, limit=limit) for item in node]
     return node
-
-
-def _add_finish_after_success_parameter(
-    schema: dict[str, Any],
-    tool_name: str,
-) -> dict[str, Any]:
-    if tool_name == "no_action":
-        return schema
-    patched = dict(schema)
-    properties = dict(patched.get("properties") or {})
-    properties.setdefault(
-        "finish_after_success",
-        {
-            "type": "boolean",
-            "default": False,
-            "description": (
-                "仅当这个工具成功且没有失败/待处理状态时，允许本轮工具循环在成功后结束。"
-                "不确定是否还需要根据工具结果继续判断时保持 false。"
-            ),
-        },
-    )
-    patched["properties"] = properties
-    return patched
-
-
-def _tool_result_blocks_completion(result: dict[str, Any]) -> bool:
-    if result.get("ok") is False:
-        return True
-    if result.get("errors"):
-        return True
-    status = result.get("status")
-    pending_statuses = {
-        "needs_review",
-        "needs_review_again",
-        "stale",
-        "failed",
-        "partial",
-        "unsupported",
-        "need_tool_search",
-    }
-    if isinstance(status, str):
-        return status in pending_statuses
-    if isinstance(status, (list, tuple, set)):
-        return any(str(item) in pending_statuses for item in status)
-    return False
 
 
 # ============================================================

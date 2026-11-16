@@ -14,8 +14,8 @@ import logging
 import re
 import sqlite3
 import time
-from collections.abc import AsyncIterable, Iterable
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterable, Awaitable, Iterable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,10 @@ import orjson
 from features.embedding import IEmbeddingService
 from utils.token_budget import TokenEstimator
 
-from .rag_store import cosine_similarity
+try:
+    import numpy as _np
+except ImportError:  # 可选加速；未安装时走预归一化的纯 Python 点积
+    _np = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +52,11 @@ class RagHit:
 class SqliteVectorStore:
     """Small persistent vector store.
 
-    SQLite is used as the durable vector database. Entries are also mirrored in
-    memory for fast cosine top-k without adding a heavyweight dependency.
+    Vectors are L2-normalized when loaded or written, so cosine similarity is a
+    single dot product. When NumPy is available the vectors are mirrored in a
+    preallocated matrix and scored with one matrix multiplication; otherwise
+    the same normalized vectors are scored in pure Python without repeating
+    the per-document square roots.
     """
 
     def __init__(self, path: Path) -> None:
@@ -58,15 +64,65 @@ class SqliteVectorStore:
         self._entries: dict[str, RagDocument] = {}
         self._loaded = False
         self._lock = asyncio.Lock()
+        self._conn: sqlite3.Connection | None = None
+        self._matrix: Any | None = None
+        self._matrix_rows = 0
+        self._matrix_capacity = 0
+        self._matrix_dim = 0
+        self._matrix_ids: list[str] = []
+        # 被取消的协程不会取消已经进入线程池的 sqlite 操作；close 必须等
+        # 这些线程真正结束，否则会在线程仍持有 connection 时把它关掉。
+        self._pending_threads: set[asyncio.Task[Any]] = set()
+
+    async def close(self) -> None:
+        """关闭复用的 SQLite 连接。"""
+        async with self._lock:
+            pending = list(self._pending_threads)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.to_thread(self._close_sync)
+
+    async def _run_db_thread(self, func: Any, *args: Any) -> Any:
+        task = asyncio.create_task(asyncio.to_thread(func, *args))
+        self._pending_threads.add(task)
+        task.add_done_callback(self._pending_threads.discard)
+        # shield：外层被取消时线程继续跑，task 留在 pending 集合里等 close。
+        return await asyncio.shield(task)
+
+    async def _run_uncancellable(self, coro: Awaitable[Any]) -> Any:
+        """让一次索引变更完整跑完 DB 写入和内存索引更新。
+
+        取消协程不会取消已经提交的 sqlite 线程。如果直接在 ``await`` 处退出，
+        会出现「DB 已提交、内存索引未更新」的永久分歧，或「top_k 线程仍在
+        遍历、锁已释放」的竞态。这里把整个操作放进独立 task：外层取消时先
+        等它结束，再把 CancelledError 抛回调用方。
+        """
+        task = asyncio.create_task(coro)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await task
+            except Exception:  # noqa: BLE001
+                logger.debug("取消期间索引操作收尾失败", exc_info=True)
+            raise
 
     async def load(self) -> None:
-        async with self._lock:
-            if self._loaded:
-                return
-            entries = await asyncio.to_thread(self._load_sync)
-            self._entries = {entry.id: entry for entry in entries}
-            self._loaded = True
-            logger.debug("RAG 向量库加载 %s 条: %s", len(self._entries), self.path)
+        async def _apply() -> None:
+            async with self._lock:
+                if self._loaded:
+                    return
+                entries = await self._run_db_thread(self._load_sync)
+                self._entries = {entry.id: entry for entry in entries}
+                self._loaded = True
+                self._rebuild_index(list(self._entries.values()))
+                logger.debug(
+                    "RAG 向量库加载 %s 条: %s",
+                    len(self._entries),
+                    self.path,
+                )
+
+        await self._run_uncancellable(_apply())
 
     async def missing_ids(self, ids: Iterable[str]) -> set[str]:
         async with self._lock:
@@ -75,22 +131,65 @@ class SqliteVectorStore:
     async def upsert_many(self, documents: list[RagDocument]) -> None:
         if not documents:
             return
-        async with self._lock:
-            await asyncio.to_thread(self._upsert_many_sync, documents)
-            for document in documents:
-                self._entries[document.id] = document
+        documents = [_normalized_document(document) for document in documents]
+
+        async def _apply() -> None:
+            async with self._lock:
+                await self._run_db_thread(self._upsert_many_sync, documents)
+                for document in documents:
+                    if document.id in self._entries:
+                        # 同 id 覆盖：矩阵里旧行的向量已失效，整体重建最稳妥。
+                        self._entries[document.id] = document
+                        self._rebuild_index(list(self._entries.values()))
+                    else:
+                        self._entries[document.id] = document
+                        self._append_to_index(document)
+
+        await self._run_uncancellable(_apply())
 
     async def remove_ids(self, ids: Iterable[str]) -> int:
         ids = {entry_id for entry_id in ids if entry_id}
         if not ids:
             return 0
-        async with self._lock:
-            await asyncio.to_thread(self._remove_ids_sync, ids)
-            removed = 0
-            for entry_id in ids:
-                if self._entries.pop(entry_id, None) is not None:
-                    removed += 1
-            return removed
+
+        async def _apply() -> int:
+            async with self._lock:
+                await self._run_db_thread(self._remove_ids_sync, ids)
+                removed = 0
+                for entry_id in ids:
+                    if self._entries.pop(entry_id, None) is not None:
+                        removed += 1
+                if removed:
+                    self._rebuild_index(list(self._entries.values()))
+                return removed
+
+        return await self._run_uncancellable(_apply())
+
+    async def top_k_async(
+        self,
+        query_vec: list[float],
+        *,
+        k: int,
+        conversation_id: str | None = None,
+        before_ts: str | None = None,
+    ) -> list[RagHit]:
+        """在线程中执行 top_k，避免大索引矩阵乘法阻塞事件循环。
+
+        整个查询持锁运行；即使调用方被取消，也等线程结束再释放锁，避免
+        后台索引在孤儿线程遍历 `_entries`/`_matrix` 时修改索引。
+        """
+
+        async def _apply() -> list[RagHit]:
+            async with self._lock:
+                return await asyncio.to_thread(
+                    self.top_k,
+                    query_vec,
+                    k=k,
+                    conversation_id=conversation_id,
+                    before_ts=before_ts,
+                )
+
+        return await self._run_uncancellable(_apply())
 
     def top_k(
         self,
@@ -102,6 +201,17 @@ class SqliteVectorStore:
     ) -> list[RagHit]:
         if not query_vec or not self._entries:
             return []
+        limit = max(1, k)
+        query = _normalize_vector(query_vec)
+        numpy_hits = self._top_k_numpy(
+            query,
+            limit=limit,
+            conversation_id=conversation_id,
+            before_ts=before_ts,
+        )
+        if numpy_hits is not None:
+            return numpy_hits
+
         candidates = self._entries.values()
         if conversation_id:
             candidates = [
@@ -114,11 +224,11 @@ class SqliteVectorStore:
                 if not entry.timestamp or entry.timestamp < before_ts
             ]
         scored = [
-            RagHit(document=entry, score=cosine_similarity(query_vec, entry.vector))
+            RagHit(document=entry, score=_dot_product(query, entry.vector))
             for entry in candidates
         ]
         scored.sort(key=lambda hit: hit.score, reverse=True)
-        return scored[: max(1, k)]
+        return scored[:limit]
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -126,13 +236,110 @@ class SqliteVectorStore:
     def all_entries(self) -> list[RagDocument]:
         return list(self._entries.values())
 
+    def _top_k_numpy(
+        self,
+        query: list[float],
+        *,
+        limit: int,
+        conversation_id: str | None,
+        before_ts: str | None,
+    ) -> list[RagHit] | None:
+        if _np is None or self._matrix is None or self._matrix_rows <= 0:
+            return None
+        if len(query) != self._matrix_dim:
+            return None
+        matrix = self._matrix[: self._matrix_rows]
+        scores = matrix @ _np.asarray(query, dtype=_np.float32)
+        # 稳定排序保持同分条目与插入顺序一致，避免每次召回顺序漂移。
+        order = _np.argsort(-scores, kind="stable")
+        hits: list[RagHit] = []
+        for rank in order:
+            row = int(rank)
+            entry = self._entries.get(self._matrix_ids[row])
+            if entry is None:
+                continue
+            if conversation_id and entry.conversation_id != conversation_id:
+                continue
+            if before_ts and entry.timestamp and entry.timestamp >= before_ts:
+                continue
+            hits.append(RagHit(document=entry, score=float(scores[row])))
+            if len(hits) >= limit:
+                break
+        return hits
+
+    def _rebuild_index(self, entries: list[RagDocument]) -> None:
+        if _np is None:
+            self._matrix = None
+            self._matrix_rows = 0
+            self._matrix_capacity = 0
+            self._matrix_dim = 0
+            self._matrix_ids = []
+            return
+        dim = 0
+        for entry in entries:
+            if entry.vector:
+                dim = len(entry.vector)
+                break
+        if dim == 0:
+            self._matrix = None
+            self._matrix_rows = 0
+            self._matrix_capacity = 0
+            self._matrix_dim = 0
+            self._matrix_ids = []
+            return
+        rows = len(entries)
+        capacity = max(1024, rows)
+        matrix = _np.zeros((capacity, dim), dtype=_np.float32)
+        ids: list[str] = []
+        for index, entry in enumerate(entries):
+            ids.append(entry.id)
+            # 空向量或维度不一致的条目保留为零向量：余弦分与任何查询都是
+            # 0，与旧纯 Python cosine_similarity 的语义一致。这样它们也会
+            # 参与排序，不会被负数分数挤出 top-k。
+            if len(entry.vector) == dim:
+                matrix[index] = entry.vector
+        self._matrix = matrix
+        self._matrix_rows = rows
+        self._matrix_capacity = capacity
+        self._matrix_dim = dim
+        self._matrix_ids = ids
+
+    def _append_to_index(self, document: RagDocument) -> None:
+        if _np is None:
+            return
+        if self._matrix is None:
+            if not document.vector:
+                return
+            self._rebuild_index(list(self._entries.values()))
+            return
+        dim = self._matrix_dim
+        if self._matrix_rows >= self._matrix_capacity:
+            capacity = max(1024, self._matrix_capacity * 2)
+            matrix = _np.zeros((capacity, dim), dtype=_np.float32)
+            if self._matrix_rows:
+                matrix[: self._matrix_rows] = self._matrix[: self._matrix_rows]
+            self._matrix = matrix
+            self._matrix_capacity = capacity
+        if len(document.vector) == dim:
+            self._matrix[self._matrix_rows] = document.vector
+        self._matrix_ids.append(document.id)
+        self._matrix_rows += 1
+
     def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        self._ensure_schema(conn)
-        return conn
+        if self._conn is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(self.path, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._ensure_schema(conn)
+            self._conn = conn
+        return self._conn
+
+    def _close_sync(self) -> None:
+        conn = self._conn
+        self._conn = None
+        if conn is not None:
+            conn.close()
 
     @staticmethod
     def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -174,7 +381,7 @@ class SqliteVectorStore:
                         role=str(row[2] or ""),
                         timestamp=str(row[3] or ""),
                         text=str(row[4] or ""),
-                        vector=[float(v) for v in vector],
+                        vector=_normalize_vector([float(v) for v in vector]),
                         meta=meta if isinstance(meta, dict) else {},
                     )
                 )
@@ -225,6 +432,27 @@ class SqliteVectorStore:
                 [(entry_id,) for entry_id in ids],
             )
             conn.commit()
+
+
+def _normalize_vector(vector: Iterable[float]) -> list[float]:
+    """L2 归一化；零向量原样返回（与任何查询的点积都是 0）。"""
+    values = [float(value) for value in vector]
+    norm = sum(value * value for value in values) ** 0.5
+    if norm == 0.0:
+        return values
+    return [value / norm for value in values]
+
+
+def _normalized_document(document: RagDocument) -> RagDocument:
+    if not document.vector:
+        return document
+    return replace(document, vector=_normalize_vector(document.vector))
+
+
+def _dot_product(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    return sum(x * y for x, y in zip(a, b, strict=True))
 
 
 class RagMemoryService:
@@ -280,6 +508,12 @@ class RagMemoryService:
                 pass
             except Exception as e:  # noqa: BLE001
                 logger.debug("RAG 后台任务关闭异常: %s", e, exc_info=True)
+        close_store = getattr(self.store, "close", None)
+        if callable(close_store):
+            try:
+                await close_store()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("关闭 RAG 向量库连接失败: %s", e, exc_info=True)
 
     async def enqueue_records(self, records: list[dict]) -> None:
         """Queue records for background indexing.
@@ -351,12 +585,21 @@ class RagMemoryService:
             logger.warning("RAG query embedding 失败，跳过本轮召回: %s", e)
             return ""
 
-        hits = self.store.top_k(
-            qvec,
-            k=top_k or self.top_k,
-            conversation_id=conversation_id,
-            before_ts=before_ts,
-        )
+        top_k_async = getattr(self.store, "top_k_async", None)
+        if callable(top_k_async):
+            hits = await top_k_async(
+                qvec,
+                k=top_k or self.top_k,
+                conversation_id=conversation_id,
+                before_ts=before_ts,
+            )
+        else:
+            hits = self.store.top_k(
+                qvec,
+                k=top_k or self.top_k,
+                conversation_id=conversation_id,
+                before_ts=before_ts,
+            )
         if not hits:
             return ""
         lines = [f"[相关历史 · RAG 召回 top-{len(hits)}]"]

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
     args_model=NoActionArgs,
     category="control",
     no_feedback=True,
+    search_tags=["沉默", "不回复", "结束", "no_action", "silence", "skip"],
 )
 async def no_action(args: NoActionArgs, ctx: ToolContext) -> dict:
     return {
@@ -43,6 +44,26 @@ async def no_action(args: NoActionArgs, ctx: ToolContext) -> dict:
     args_model=ScheduleWakeupArgs,
     category="control",
     no_feedback=True,
+    search_tags=["定时", "提醒", "闹钟", "延迟", "timer", "remind", "wakeup", "日程"],
+    examples=[
+        {
+            "delay_seconds": 600,
+            "mode": "send_message",
+            "message_text": "该喝水了",
+            "target_type": "private",
+            "target_id": 123456,
+        },
+        {
+            "delay_seconds": 3600,
+            "mode": "wakeup",
+            "reminder": (
+                "一小时后检查群 123456 最近讨论；若出现需要我回应的问题，"
+                "总结后私聊提醒我，否则主动忽略。"
+            ),
+            "target_type": "group",
+            "target_id": 123456,
+        },
+    ],
 )
 async def schedule_wakeup(args: ScheduleWakeupArgs, ctx: ToolContext) -> dict:
     if ctx.wakeup_cb is None:
@@ -158,6 +179,7 @@ def _build_wakeup_reminder(
     args_model=ChatSelectionArgs,
     category="control",
     no_feedback=True,
+    search_tags=["群聊", "接收", "暂停", "筛选", "mute", "pause", "selection"],
 )
 async def chat_selection(args: ChatSelectionArgs, ctx: ToolContext) -> dict:
     if ctx.chat_selection_cb is None:

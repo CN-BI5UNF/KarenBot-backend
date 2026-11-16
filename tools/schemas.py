@@ -39,33 +39,26 @@ class PrivateMessageTarget(_ToolArgs):
     target_qq: int = Field(..., description="接收者 QQ 号")
     content: str | None = Field(
         default=None,
-        description="消息正文；可加 [CQ:reply,id=msg_id] 引用。",
+        description="文本正文，可含 [CQ:reply,id=...] 或 [CQ:at,qq=...]；与 emoji/image/face 四选一。",
     )
     emoji: str | None = Field(
         default=None,
-        description="表情包名称，不带后缀；从 task_context 列表选择。",
+        description="表情包名称（不含后缀，取自 task_context）；与 content/image/face 四选一。",
     )
     image: str | None = Field(
         default=None,
-        description="图片 URL、workspace 路径，或当前人格角色形象引用 persona-image:<当前人格>[:<image_id>]；不是表情包。",
+        description="图片 URL、workspace 路径或 persona-image:<人格>[:<id>]（非表情包）；与 content/emoji/face 四选一。",
     )
     face: str | None = Field(
         default=None,
-        description=(
-            "QQ 原生表情名（如“流泪”“笑哭”），也可填 ID。"
-        ),
+        description="QQ 原生表情名或 ID（如“流泪”“笑哭”）；与 content/emoji/image 四选一。",
     )
-    order: int = Field(..., description="发送顺序，从小到大")
+    order: int = Field(..., description="发送顺序，从 1 开始升序")
     delay: float = Field(
         ...,
         ge=0,
         allow_inf_nan=False,
-        description=(
-            "本条发出后到下一条发出前的等待秒数；最后一条也必须填写，可填 0；"
-            "单条消息只发一条时 delay=0 合法。第 i 条 delay 按下一条即将发送的可见内容估算，"
-            "非最后一条通常不要低于 2 秒：中文约 1.5 个中文字/秒，再加 0.5-1.5 秒自然停顿；"
-            "转折、补充、犹豫或长内容加 2-5 秒；表情包和图片按约 1.5-3 秒。"
-        ),
+        description="本条发出后到下一条的等待秒数；末条填 0，其余通常 ≥2（按 <messaging> 规则估算）。",
     )
 
     @model_validator(mode="after")
@@ -90,8 +83,8 @@ class SendPrivateArgs(_ToolArgs):
         default=None,
         ge=0,
         description=(
-            "发送前复核锚点：表示这次待发送内容基于已看到的最新入站 seq。"
-            "不填时使用当前模型轮开始时的 seen_seq；收到 needs_review 后再次发送或 commit 应填返回的 latest_seq。"
+            "发送前复核锚点：这次内容基于已看到的最新入站 seq。"
+            "不填时使用本轮开始时的 seen_seq；needs_review 后重发或 commit 填返回的 latest_seq。"
         ),
     )
     review_policy: SendReviewPolicy = Field(
@@ -128,10 +121,8 @@ class SendPrivateArgs(_ToolArgs):
     reply_to_message_id: str | None = Field(
         default=None,
         description=(
-            "可选：这次发送要引用回复的消息 ID；程序会在第一条文本消息前补 CQ 引用。"
-            "私聊/群聊都适用。延迟回复、吃饭睡觉后接旧话、主动思考接旧话、"
-            "复核旧 attempt、回复非最新消息，或短回复可能看不出回谁时优先填写；"
-            "没有可靠 msg_id 不要编造，改用点名或自然语言锚定。"
+            "可选：要引用回复的真实 msg_id；程序会在第一条文本前补 CQ 引用。"
+            "延迟回复、接旧话、回复非最新消息或短回复可能看不出回谁时优先填写；没有可靠 ID 不要编造。"
         ),
     )
     reason: str | None = Field(
@@ -145,33 +136,26 @@ class GroupMessageTarget(_ToolArgs):
 
     content: str | None = Field(
         default=None,
-        description="消息正文；@人用 [CQ:at,qq=QQ号]，引用用 [CQ:reply,id=msg_id]。",
+        description="文本正文，可含 [CQ:reply,id=...] 或 [CQ:at,qq=...]；与 emoji/image/face 四选一。",
     )
     emoji: str | None = Field(
         default=None,
-        description="表情包名称，不带后缀；从 task_context 列表选择。",
+        description="表情包名称（不含后缀，取自 task_context）；与 content/image/face 四选一。",
     )
     image: str | None = Field(
         default=None,
-        description="图片 URL、workspace 路径，或当前人格角色形象引用 persona-image:<当前人格>[:<image_id>]；不是表情包。",
+        description="图片 URL、workspace 路径或 persona-image:<人格>[:<id>]（非表情包）；与 content/emoji/face 四选一。",
     )
     face: str | None = Field(
         default=None,
-        description=(
-            "QQ 原生表情名（如“流泪”“笑哭”），也可填 ID。"
-        ),
+        description="QQ 原生表情名或 ID（如“流泪”“笑哭”）；与 content/emoji/image 四选一。",
     )
-    order: int = Field(..., description="发送顺序，从小到大")
+    order: int = Field(..., description="发送顺序，从 1 开始升序")
     delay: float = Field(
         ...,
         ge=0,
         allow_inf_nan=False,
-        description=(
-            "本条发出后到下一条发出前的等待秒数；最后一条也必须填写，可填 0；"
-            "单条消息只发一条时 delay=0 合法。第 i 条 delay 按下一条即将发送的可见内容估算，"
-            "非最后一条通常不要低于 2 秒：中文约 1.5 个中文字/秒，再加 0.5-1.5 秒自然停顿；"
-            "转折、补充、犹豫或长内容加 2-5 秒；表情包和图片按约 1.5-3 秒。"
-        ),
+        description="本条发出后到下一条的等待秒数；末条填 0，其余通常 ≥2（按 <messaging> 规则估算）。",
     )
 
     @model_validator(mode="after")
@@ -197,8 +181,8 @@ class SendGroupArgs(_ToolArgs):
         default=None,
         ge=0,
         description=(
-            "发送前复核锚点：表示这次待发送内容基于已看到的最新入站 seq。"
-            "不填时使用当前模型轮开始时的 seen_seq；收到 needs_review 后再次发送或 commit 应填返回的 latest_seq。"
+            "发送前复核锚点：这次内容基于已看到的最新入站 seq。"
+            "不填时使用本轮开始时的 seen_seq；needs_review 后重发或 commit 填返回的 latest_seq。"
         ),
     )
     review_policy: SendReviewPolicy = Field(
@@ -237,11 +221,9 @@ class SendGroupArgs(_ToolArgs):
     reply_to_message_id: str | None = Field(
         default=None,
         description=(
-            "可选：这次发送要引用回复的消息 ID；程序会在第一条文本消息前补 CQ 引用。"
-            "私聊/群聊都适用。延迟回复、吃饭睡觉后接旧话、主动思考接旧话、"
-            "回复对象不是紧邻上一条、多人连续插话、回答被引用的消息、"
-            "复核后继续提交旧 attempt，或“行/OK/可以/知道了/不要”等短回复可能看不出回谁时，"
-            "优先填写。普通顺序闲聊不要机械每条都填；没有可靠 msg_id 不要编造，改用点名或自然语言锚定。"
+            "可选：要引用回复的真实 msg_id；程序会在第一条文本前补 CQ 引用。"
+            "延迟回复、接旧话、回复非最新消息、多人插话或短确认可能看不出回谁时优先填写；"
+            "没有可靠 ID 不要编造。"
         ),
     )
     reason: str | None = Field(
@@ -261,7 +243,7 @@ class CommitSendAttemptArgs(_ToolArgs):
     reviewed_until_seq: int | None = Field(
         default=None,
         ge=0,
-        description="复核后已看到的最新入站 seq。通常填 needs_review 返回的 latest_seq。",
+        description="复核后已看到的最新入站 seq；通常填 needs_review 返回的 latest_seq。",
     )
     delivery_interrupt_policy: SendInterruptPolicy = Field(
         default="interrupt_priority",
@@ -273,11 +255,8 @@ class CommitSendAttemptArgs(_ToolArgs):
     reply_to_message_id: str | None = Field(
         default=None,
         description=(
-            "可选：确认发送时给第一条文本消息补引用。提交旧 attempt 前先复核旧回复是否需要补引用；"
-            "私聊/群聊都适用。延迟回复、吃饭睡觉后接旧话、主动思考接旧话、"
-            "复核后提交旧 attempt、中间已有多人插话、回答被引用的消息、回复非最新消息，"
-            "或短确认会看不出回谁时优先填写；普通顺序闲聊不要机械每条都填，"
-            "没有可靠 msg_id 不要编造，改用点名或自然语言锚定。"
+            "可选：确认发送时给第一条文本补引用。提交旧 attempt 前先复核是否需要补引用；"
+            "延迟回复、接旧话、回复非最新消息或短确认会看不出回谁时优先填写；没有可靠 ID 不要编造。"
         ),
     )
     ignore_review_interrupts: bool = Field(
@@ -502,11 +481,8 @@ class SaveMemoryArgs(_ToolArgs):
     scope: str | None = Field(
         default=None,
         description=(
-            "必填：按语义显式选择记忆适用范围，只能填 global、user:QQ号 或 group:群号。"
-            "不会按当前会话自动推断；不要填 private:QQ。global=跨场景都应参考的事实、"
-            "长期目标或项目；user:QQ号=只适用于该用户本人的身份、偏好、私聊约定；"
-            "group:群号=只适用于该群的群规、群内约定或群内梗。"
-            "提到某用户不等于 user scope；例如“冰狼正在做短中期项目”这种跨场景事实应为 global。"
+            "必填：global | user:QQ号 | group:群号；严禁填 private:QQ。"
+            "按语义选择，提到某用户不等于 user scope。"
         ),
     )
     pinned: bool = Field(
@@ -521,14 +497,14 @@ class DeleteMemoryArgs(_ToolArgs):
     memory_id: str | None = Field(
         default=None,
         description=(
-            "要删除的重要记忆 ID。推荐使用 memory_id；必须来自重要记忆上下文中展示的 ID、"
-            "save_important_memory 返回的 memory_id，或 existing_id。"
+            "要删除的重要记忆 ID；来自 long_term_memory 展示的 ID、"
+            "保存返回的 memory_id 或 existing_id。"
         ),
     )
     keyword: str | None = Field(
         default=None,
         description=(
-            "旧版兼容参数：按关键词模糊删除。新调用不要使用；能看到记忆 ID 时必须填 memory_id，"
+            "旧版兼容参数：按关键词模糊删除。新调用优先 memory_id，"
             "避免关键词误删多条记忆。"
         ),
     )
@@ -563,9 +539,8 @@ class UpdateMemoryArgs(_ToolArgs):
     scope: str | None = Field(
         default=None,
         description=(
-            "可选：同时更新记忆适用范围。修改 memory_text 时要重新判断语义范围；"
-            "仍适用原范围可不填，跨场景事实填 global，只适用于某用户本人填 user:QQ号，"
-            "只适用于某群填 group:群号；不要填 private:QQ，也不要因为正文提到某用户就自动选 user scope。"
+            "可选：同时更新适用范围（global | user:QQ号 | group:群号）；"
+            "不要填 private:QQ，也不要因为正文提到某用户就自动选 user scope。"
         ),
     )
     pinned: bool | None = Field(
@@ -914,10 +889,8 @@ class StartAgentTaskArgs(_ToolArgs):
     sources: list[AgentTaskSource] = Field(
         default_factory=list,
         description=(
-            "资料来源列表。支持 workspace_path/tool_call_id/tool_result_file/forward_id/"
-            "conversation_history/message_id/image_ref/inline_text/inline_json/"
-            "workspace_glob/directory；不支持 URL。image_ref 仅用于已有可用图像理解能力时的资料整理，"
-            "不能用来绕过 describe_image 失败。"
+            "资料来源列表；类型见 items 枚举。不支持 URL；"
+            "image_ref 不能用来绕过 describe_image 失败。"
         ),
     )
     output_format: Literal["markdown", "json", "text"] = Field(
@@ -998,8 +971,8 @@ class LoadToolsetArgs(_ToolArgs):
         min_length=1,
         max_length=64,
         description=(
-            "要加载的工具集 id，例如 workspace、messaging、qq_info、qq_admin、"
-            "history、memory、knowledge、web、emoji、persona、container、control。"
+            "要加载的工具集 id（如 workspace、messaging、web、emoji）；"
+            "先用 list_toolsets 查看目录。"
         ),
     )
 
@@ -1111,11 +1084,8 @@ class DescribeImageArgs(_ToolArgs):
         ...,
         min_length=1,
         description=(
-            "图片 URL、workspace 中已存在的图片路径，或知识库里的 "
-            "persona-image:<当前人格> 引用。从用户消息的 [图片 url=...]、"
-            "[图片 workspace=...] 标记中获取；收到图片时先用此工具理解内容。"
-            "角色形象知识条目会给出 persona-image 引用，只能访问当前人格。"
-            "不要根据 msg_id 猜 incoming/img_*.jpg；只能使用实际存在的引用。"
+            "图片 URL、workspace 图片路径，或 persona-image:<当前人格> 引用；"
+            "只能使用消息中真实出现的引用，不要猜路径。"
         ),
     )
     prompt: str | None = Field(

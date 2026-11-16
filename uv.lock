@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -2066,6 +2066,9 @@ local-models = [
     { name = "voxcpm" },
 ]
 perf = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "uvloop", marker = "sys_platform != 'win32'" },
 ]
 tts-local = [
@@ -2084,6 +2087,7 @@ requires-dist = [
     { name = "google-genai", specifier = ">=0.3.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "keyring", specifier = ">=24.0.0" },
+    { name = "numpy", marker = "extra == 'perf'", specifier = ">=1.26.0" },
     { name = "openai", specifier = ">=1.50.0" },
     { name = "orjson", specifier = ">=3.10.0" },
     { name = "pillow", specifier = ">=10.4.0" },

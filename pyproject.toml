@@ -50,9 +50,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 性能优化（Linux/Mac 自动使用 uvloop）
+# 性能优化（Linux/Mac 自动使用 uvloop；numpy 用于 RAG 矩阵检索）
 perf = [
     "uvloop>=0.19.0 ; sys_platform != 'win32'",
+    "numpy>=1.26.0",
 ]
 
 # 本地 TTS 插件依赖。也会在用户打开模型安装指引时按需后台安装。
@@ -165,6 +166,7 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 addopts = "-m 'not live'"
 markers = [
     "live: 需要真实 API 密钥的端到端测试（默认不跑）",

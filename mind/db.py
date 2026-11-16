@@ -69,13 +69,15 @@ _clamp_int = _db_records._clamp_int
 class PersonaDB:
     """人格系统 sqlite3 后端。
 
-    连接按操作打开，所有阻塞 sqlite3 调用通过 asyncio.to_thread 执行，并用
-    asyncio.Lock 串行化写入与读取。
+    复用单个连接，所有阻塞 sqlite3 调用通过 asyncio.to_thread 执行，并用
+    asyncio.Lock 串行化写入与读取。连接使用 ``check_same_thread=False``，
+    由锁保证同一时刻只有一个线程使用它。
     """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._lock = asyncio.Lock()
+        self._conn: sqlite3.Connection | None = None
 
     async def load(self) -> None:
         """初始化数据库 schema。"""
@@ -83,8 +85,9 @@ class PersonaDB:
             await asyncio.to_thread(self._load_sync)
 
     async def close(self) -> None:
-        """按操作连接，无常驻连接需要关闭。"""
-        return None
+        """关闭复用的 SQLite 连接。"""
+        async with self._lock:
+            await asyncio.to_thread(self._close_sync)
 
     async def get_state(self, default: Any = _MISSING) -> Any:
         async with self._lock:
@@ -383,13 +386,21 @@ class PersonaDB:
             return await asyncio.to_thread(self._important_count_sync)
 
     def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        self._ensure_schema(conn)
-        return conn
+        if self._conn is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(self.path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._ensure_schema(conn)
+            self._conn = conn
+        return self._conn
+
+    def _close_sync(self) -> None:
+        conn = self._conn
+        self._conn = None
+        if conn is not None:
+            conn.close()
 
     def _load_sync(self) -> None:
         with self._connect():

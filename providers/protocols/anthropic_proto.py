@@ -61,6 +61,13 @@ _ANTHROPIC_IMAGE_MEDIA_TYPES = frozenset(
 )
 _MAX_IMAGE_DATA_CHARS = 4 * ((MAX_IMAGE_BYTES + 2) // 3) + 16
 
+_PROMPT_SECTION_FIELD = "_prompt_section"
+_VOLATILE_TAIL = "volatile_tail"
+_CACHE_CONTROL = {"type": "ephemeral"}
+_CACHEABLE_BLOCK_TYPES = frozenset(
+    {"text", "image", "document", "tool_use", "tool_result"}
+)
+
 
 class AnthropicProvider(IProvider):
     """Anthropic Claude 适配。"""
@@ -112,8 +119,18 @@ class AnthropicProvider(IProvider):
             raise ProviderUnsupportedError(
                 f"{self.name}: extra 不能覆盖 messages/system/tools"
             )
-        system_text, anthropic_messages = self._convert_messages(messages)
+        stable_prefix_end = _stable_prefix_end(messages)
+        system_text, anthropic_messages, break_at = self._convert_messages(
+            messages,
+            stable_prefix_end=stable_prefix_end,
+        )
         anthropic_tools = self._convert_tools(tools) if tools else None
+        if anthropic_tools:
+            # 最后一个 tool 上的断点缓存 system 之前的全部 tools 定义。
+            last_tool = dict(anthropic_tools[-1])
+            last_tool["cache_control"] = dict(_CACHE_CONTROL)
+            anthropic_tools[-1] = last_tool
+        _apply_cache_breakpoint(anthropic_messages, break_at)
 
         kwargs: dict[str, Any] = {
             "model": model,
@@ -123,7 +140,15 @@ class AnthropicProvider(IProvider):
             "top_p": top_p,
         }
         if system_text:
-            kwargs["system"] = system_text
+            # 显式传入块数组才能在 system 上挂 cache_control；裸字符串会被
+            # Anthropic 当成不可缓存的普通 system。
+            kwargs["system"] = [
+                {
+                    "type": "text",
+                    "text": system_text,
+                    "cache_control": dict(_CACHE_CONTROL),
+                }
+            ]
         if anthropic_tools:
             kwargs["tools"] = anthropic_tools
 
@@ -150,9 +175,24 @@ class AnthropicProvider(IProvider):
             kwargs.update(extra)
 
         try:
-            if stream:
-                return await self._stream_call(kwargs, first_token_timeout)
-            return await self._nonstream_call(kwargs)
+            try:
+                if stream:
+                    return await self._stream_call(kwargs, first_token_timeout)
+                return await self._nonstream_call(kwargs)
+            except APIError as e:
+                # prompt caching 是可选优化：少数 Anthropic 兼容中转站会
+                # 直接 400 拒绝 cache_control。此时去掉断点重试一次，不能
+                # 因为缓存优化让整个对话失败。
+                if not _is_cache_control_rejection(e):
+                    raise
+                logger.warning(
+                    "%s: 上游拒绝 cache_control，降级为无 Prompt Caching 重试",
+                    self.name,
+                )
+                fallback_kwargs = _strip_cache_control(kwargs)
+                if stream:
+                    return await self._stream_call(fallback_kwargs, first_token_timeout)
+                return await self._nonstream_call(fallback_kwargs)
         except AuthenticationError as e:
             raise ProviderAuthError(
                 f"{self.name}: 认证失败: {safe_provider_error_text(e)}"
@@ -183,16 +223,23 @@ class AnthropicProvider(IProvider):
     @staticmethod
     def _convert_messages(
         messages: list[dict[str, Any]],
-    ) -> tuple[str, list[dict[str, Any]]]:
-        """OpenAI 风格 messages → (system_text, anthropic_messages)。
+        *,
+        stable_prefix_end: int | None = None,
+    ) -> tuple[str, list[dict[str, Any]], int | None]:
+        """OpenAI 风格 messages → (system_text, anthropic_messages, break_at)。
 
-        合并多个 system 消息为单一 system 文本；
-        合并连续相同 role 的消息（Anthropic 要求 user/assistant 交替）。
+        ``break_at`` 是稳定前缀最后一个转换后消息的下标 + 1，用于挂载
+        prompt caching 断点；没有稳定前缀时为 None。
         """
         system_parts: list[str] = []
         result: list[dict[str, Any]] = []
+        break_at: int | None = None
+        last_stable_source = _last_stable_source_index(
+            messages,
+            stable_prefix_end=stable_prefix_end,
+        )
 
-        for m in messages:
+        for source_index, m in enumerate(messages):
             role = m.get("role")
             content = m.get("content", "") or ""
 
@@ -222,6 +269,8 @@ class AnthropicProvider(IProvider):
                 ]
                 # tool_result 必须放在 user 角色下
                 result.append({"role": "user", "content": blocks})
+                if source_index == last_stable_source:
+                    break_at = len(result)
                 continue
 
             if role == "user":
@@ -231,6 +280,8 @@ class AnthropicProvider(IProvider):
                         "content": _convert_user_content(content),
                     }
                 )
+                if source_index == last_stable_source:
+                    break_at = len(result)
                 continue
 
             if role == "assistant":
@@ -266,13 +317,17 @@ class AnthropicProvider(IProvider):
                         }
                     )
                 result.append({"role": "assistant", "content": blocks or content})
+                if source_index == last_stable_source:
+                    break_at = len(result)
                 continue
 
         # Anthropic 要求 messages 不为空，且首条不能是 assistant
         if result and result[0]["role"] == "assistant":
             result.insert(0, {"role": "user", "content": "[continue]"})
+            if break_at is not None:
+                break_at += 1
 
-        return "\n\n".join(system_parts), result
+        return "\n\n".join(system_parts), result, break_at
 
     @staticmethod
     def _convert_tools(openai_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -540,6 +595,91 @@ def _usage_int(usage: Any, name: str, fallback: int) -> int:
     if value is None:
         return fallback
     return int(value or 0)
+
+
+def _stable_prefix_end(messages: list[dict[str, Any]]) -> int | None:
+    """返回首个 volatile tail 消息的下标；没有结构标记时返回 None。
+
+    provider 层不 import agents.context_builder（会形成循环依赖），只读取
+    builder 写入请求副本的稳定结构标记。没有标记时只缓存 tools/system。
+    """
+    for index, message in enumerate(messages):
+        if (
+            isinstance(message, dict)
+            and message.get(_PROMPT_SECTION_FIELD) == _VOLATILE_TAIL
+        ):
+            return index
+    return None
+
+
+def _last_stable_source_index(
+    messages: list[dict[str, Any]],
+    *,
+    stable_prefix_end: int | None,
+) -> int | None:
+    if stable_prefix_end is None:
+        return None
+    last: int | None = None
+    for index in range(min(stable_prefix_end, len(messages))):
+        message = messages[index]
+        if isinstance(message, dict) and message.get("role") != "system":
+            last = index
+    return last
+
+
+def _apply_cache_breakpoint(
+    messages: list[dict[str, Any]],
+    break_at: int | None,
+) -> None:
+    """在稳定前缀最后一个消息的最后一个可缓存 block 上挂 cache_control。"""
+    if not break_at or break_at <= 0 or break_at > len(messages):
+        return
+    message = messages[break_at - 1]
+    content = message.get("content")
+    if isinstance(content, str):
+        if content.strip():
+            message["content"] = [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": dict(_CACHE_CONTROL),
+                }
+            ]
+        return
+    if not isinstance(content, list):
+        return
+    for block in reversed(content):
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type not in _CACHEABLE_BLOCK_TYPES:
+            continue
+        # Anthropic 明确拒绝在空 text block 上挂 cache_control。
+        if block_type == "text" and not str(block.get("text") or "").strip():
+            continue
+        block["cache_control"] = dict(_CACHE_CONTROL)
+        return
+
+
+def _is_cache_control_rejection(error: Exception) -> bool:
+    """部分 Anthropic 兼容中转站会拒绝 cache_control；识别后降级重试。"""
+    status_code = getattr(error, "status_code", None)
+    if status_code != 400:
+        return False
+    text = safe_provider_error_text(error).lower()
+    return "cache_control" in text or "cache control" in text
+
+
+def _strip_cache_control(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {
+            key: _strip_cache_control(value)
+            for key, value in node.items()
+            if key != "cache_control"
+        }
+    if isinstance(node, list):
+        return [_strip_cache_control(item) for item in node]
+    return node
 
 
 def _convert_user_content(content: Any) -> str | list[dict[str, Any]]:

@@ -45,6 +45,17 @@ def _error(message: str) -> dict[str, Any]:
     ),
     args_model=SaveKnowledgeNoteArgs,
     category="knowledge",
+    search_tags=["知识", "笔记", "热梗", "保存", "knowledge", "note", "meme"],
+    examples=[
+        {
+            "kind": "meme",
+            "title": "city不city",
+            "content": "网络流行语，源于外国博主感慨中国城市现代化，后用于调侃某地是否够都市化。",
+            "usage": "看到有人评价城市或生活方式时可用。",
+            "tags": ["热梗", "流行语"],
+            "sources": ["https://example.com/source"],
+        }
+    ],
 )
 async def save_knowledge_note(args: SaveKnowledgeNoteArgs, ctx: ToolContext) -> dict:
     service = _service(ctx)
@@ -90,6 +101,15 @@ async def save_knowledge_note(args: SaveKnowledgeNoteArgs, ctx: ToolContext) -> 
     ),
     args_model=ResearchWebToPromptArgs,
     category="knowledge",
+    search_tags=["研究", "联网", "整理", "知识", "research", "web", "prompt"],
+    examples=[
+        {
+            "query": "2026 年流行的网络热梗及含义",
+            "kind": "meme",
+            "max_notes": 5,
+            "save": True,
+        }
+    ],
 )
 async def research_web_to_prompt(args: ResearchWebToPromptArgs, ctx: ToolContext) -> dict:
     service = _service(ctx)
@@ -144,6 +164,8 @@ async def research_web_to_prompt(args: ResearchWebToPromptArgs, ctx: ToolContext
     ),
     args_model=ListKnowledgeArgs,
     category="knowledge",
+    search_tags=["知识", "笔记", "热梗", "查询", "knowledge", "note", "meme"],
+    concurrency_safe=True,
 )
 async def list_knowledge_notes(args: ListKnowledgeArgs, ctx: ToolContext) -> dict:
     service = _service(ctx)
@@ -173,6 +195,7 @@ async def list_knowledge_notes(args: ListKnowledgeArgs, ctx: ToolContext) -> dic
     ),
     args_model=DeleteKnowledgeNoteArgs,
     category="knowledge",
+    search_tags=["知识", "笔记", "删除", "knowledge", "delete", "note"],
 )
 async def delete_knowledge_note(args: DeleteKnowledgeNoteArgs, ctx: ToolContext) -> dict:
     service = _service(ctx)

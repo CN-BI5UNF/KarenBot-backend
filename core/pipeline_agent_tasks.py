@@ -17,6 +17,7 @@ from typing import Any
 
 from adapters.types import Target
 from agents.base import AgentRunResult
+from tools.base import copy_executor_metadata
 
 from .agent_task_helpers import (
     _agent_record_matches,
@@ -44,6 +45,40 @@ def _message_pipeline_global(name: str, fallback):
     if module is None:
         return fallback
     return getattr(module, name, fallback)
+
+
+def _wrap_agent_task_executor(
+    sub_executor: Any,
+    *,
+    output_rel: str,
+    same_workspace_path: Any,
+) -> Any:
+    """给子 Agent executor 加结果文件收尾，并保留并发安全标记。"""
+
+    async def _sub_executor(
+        tool_name: str,
+        args: dict[str, Any],
+        *,
+        tool_call_id: str | None = None,
+    ) -> dict[str, Any]:
+        result = await sub_executor(
+            tool_name,
+            args,
+            tool_call_id=tool_call_id,
+        )
+        if (
+            tool_name in {"write_file", "agent_write"}
+            and result.get("ok", False)
+            and same_workspace_path(result.get("path"), output_rel)
+        ):
+            result = dict(result)
+            result["stop_after_tool"] = True
+            result["next"] = (
+                "目标结果文件已写出，本后台任务将立即结束并把结果返回给主 Agent。"
+            )
+        return result
+
+    return copy_executor_metadata(_sub_executor, sub_executor)
 
 
 class PipelineAgentTasksMixin:
@@ -262,21 +297,11 @@ class PipelineAgentTasksMixin:
             )
             output_rel = _workspace_rel(output_path, self.workspace_dir)
             manifest_rel = _workspace_rel(manifest_path, self.workspace_dir)
-            sub_executor = sub_registry.get_executor(sub_ctx)
-
-            async def _sub_executor(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
-                result = await sub_executor(tool_name, args)
-                if (
-                    tool_name in {"write_file", "agent_write"}
-                    and result.get("ok", False)
-                    and self._same_workspace_path(result.get("path"), output_rel)
-                ):
-                    result = dict(result)
-                    result["stop_after_tool"] = True
-                    result["next"] = (
-                        "目标结果文件已写出，本后台任务将立即结束并把结果返回给主 Agent。"
-                    )
-                return result
+            sub_executor = _wrap_agent_task_executor(
+                sub_registry.get_executor(sub_ctx),
+                output_rel=output_rel,
+                same_workspace_path=self._same_workspace_path,
+            )
 
             if coding:
                 target_hint = (
@@ -338,7 +363,7 @@ class PipelineAgentTasksMixin:
                             if coding
                             else sub_registry.get_schemas()
                         ),
-                        tool_executor=_sub_executor,
+                        tool_executor=sub_executor,
                         task_contract=f"后台资料处理任务 {task_id}",
                         max_loops=max_loops,
                         prompt_budget_tokens=(

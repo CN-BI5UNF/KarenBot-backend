@@ -377,6 +377,9 @@ uv run python -m pytest tests/ -q --ignore=tests/test_kv_cache_real.py
 - **KV 缓存前缀稳定**（context_builder）
 - **模型视图裁剪**（`core/model_view.py`）：旧运行时快照/回执/no_action 不再进入 prompt
 - **工具 schema 分级**（`tools/base.py`）：compact + stub + `tool_search detail=full`
+- **只读工具批次并发**（`agents/runner.py`）：连续 `concurrency_safe` 工具用 `asyncio.gather` 执行，写操作仍保持顺序屏障
+- **RAG 向量预归一化 + 可选 NumPy 矩阵检索**（`memory/rag_memory.py`）：余弦相似度退化为点积，安装 `perf` extra 后矩阵乘法加速
+- **Anthropic Prompt Caching**（`providers/protocols/anthropic_proto.py`）：自动在 tools / system / 稳定历史末尾挂 `cache_control` 断点
 - **发送成功自动收尾**（`agents/runner.py`）：省掉一次 `no_action` 模型调用
 - **Token 计量**（`utils/token_budget.py` + `core/token_calibration.py`）：规范 JSON、持久化校准、编码缓存
 - **KV 诊断分级**（`agents/runner.py`）：默认 `summary`，不再每轮多次全量序列化
