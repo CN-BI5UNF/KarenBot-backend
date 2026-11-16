@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased — 工具提示与运行时优化
+## v0.1.3-alpha — 2026-11-16
+
+后端模块版本 `v0.1.3-alpha`，应用代码版本 `1.0.3-alpha`。基于 `v0.1.1-alpha.1`；界面模块仍由各自仓库独立发布。
 
 - `group_trigger_window` 在 compact 模式改为常驻紧凑 schema，task_context 不再要求先 `tool_search`，省掉一轮无效调用。
 - `reply_to_message_id` / `reviewed_until_seq` 不再从 compact schema 隐藏；`needs_review` 重发和引用回复可直接使用。
