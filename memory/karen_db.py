@@ -2,18 +2,37 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import re
 import sqlite3
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-KAREN_DB_SCHEMA_VERSION = 1
+logger = logging.getLogger(__name__)
+
+KAREN_DB_SCHEMA_VERSION = 2
 KAREN_DB_INITIAL_MIGRATION_ID = "v1_initial_schema"
+KAREN_DB_ARCHIVE_HASH_MIGRATION_ID = "v2_archive_record_hash"
 DEFAULT_BUSY_TIMEOUT_MS = 30_000
+
+# archive_messages 去重指纹长度。32 位十六进制（128 bit）在本地单库规模下
+# 碰撞概率可以忽略，同时索引宽度只有完整 JSON 的几十分之一。
+_ARCHIVE_RECORD_HASH_LENGTH = 32
+
+
+def archive_record_hash(record_json: str) -> str:
+    """返回归档记录正文的去重指纹，供写入与迁移回填共用。"""
+
+    return hashlib.sha256(record_json.encode("utf-8")).hexdigest()[
+        :_ARCHIVE_RECORD_HASH_LENGTH
+    ]
+
 
 # schema 初始化只在版本检查失败时发生；这把进程内锁避免多个 Store 在
 # 首次并发访问时重复跑同一批 DDL。跨进程仍由 SQLite 自己的写锁串行化。
@@ -50,15 +69,13 @@ class KarenDB:
         self._conn: sqlite3.Connection | None = None
 
     def load(self) -> KarenDB:
-        """打开数据库并幂等初始化 v1 schema。
+        """打开数据库并确保 schema 可用。
 
-        该入口保留“总是执行 schema 初始化”的旧语义，主要供导入、测试和
-        显式管理入口使用。普通读写热路径应使用 :meth:`ensure_ready`。
+        与 :meth:`ensure_ready` 等价；保留该名字供导入器、测试和显式
+        管理入口使用，重复调用不会重复执行迁移或回填。
         """
 
-        conn = self.connect()
-        self.ensure_schema(conn)
-        return self
+        return self.ensure_ready()
 
     def ensure_ready(self) -> KarenDB:
         """打开数据库，仅在版本落后或对象缺失时初始化 schema。
@@ -111,24 +128,48 @@ class KarenDB:
         return self._conn
 
     def ensure_schema(self, conn: sqlite3.Connection | None = None) -> None:
-        """创建 karen.db v1 空表契约，并写入统一版本记录。"""
+        """把 karen.db 迁移到当前版本，并修复缺失的当前版本对象。"""
 
         target = conn if conn is not None else self.connect()
         _raise_if_future_schema(self.schema_version(target))
-        with target:
-            for statement in _V1_SCHEMA_STATEMENTS:
-                target.execute(statement)
-            target.execute(f"PRAGMA user_version = {KAREN_DB_SCHEMA_VERSION}")
-            target.execute(
-                """
-                INSERT OR IGNORE INTO schema_migrations(version, migration_id, applied_at)
-                VALUES (?, ?, ?)
-                """,
-                (
-                    KAREN_DB_SCHEMA_VERSION,
-                    KAREN_DB_INITIAL_MIGRATION_ID,
-                    _utc_timestamp(),
-                ),
+        self._apply_pending_migrations(target)
+        _ensure_current_schema(target)
+
+    def _apply_pending_migrations(self, conn: sqlite3.Connection) -> None:
+        # 迁移表与被迁移的表必须先存在：user_version 可能被外部工具单独
+        # 抬高，或者旧库丢失了某张表。建表语句本身是幂等的。
+        with conn:
+            conn.execute(_MIGRATIONS_TABLE_SQL)
+            for statement in _TABLE_CREATION_STATEMENTS:
+                conn.execute(statement)
+        version = self.schema_version(conn)
+        applied = max(version.user_version, version.migration_version or 0)
+        for migration in _SCHEMA_MIGRATIONS:
+            if migration.version <= applied:
+                continue
+            with conn:
+                for statement in migration.statements:
+                    conn.execute(statement)
+                if migration.apply is not None:
+                    migration.apply(conn)
+                conn.execute(f"PRAGMA user_version = {migration.version}")
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO schema_migrations(
+                        version, migration_id, applied_at
+                    )
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        migration.version,
+                        migration.migration_id,
+                        _utc_timestamp(),
+                    ),
+                )
+            logger.info(
+                "karen.db 迁移完成 migration_id=%s version=%s",
+                migration.migration_id,
+                migration.version,
             )
 
     def schema_version(self, conn: sqlite3.Connection | None = None) -> KarenDBSchemaVersion:
@@ -228,24 +269,32 @@ def _raise_if_future_schema(version: KarenDBSchemaVersion) -> None:
 
 
 def _schema_objects_present(conn: sqlite3.Connection) -> bool:
-    """确认 v1 契约里的表和索引都还在，供 ``ensure_ready`` 自愈缺表库。"""
+    """确认当前契约里的表和索引都还在，供 ``ensure_ready`` 自愈缺表库。"""
 
-    placeholders = ",".join("?" for _ in _V1_SCHEMA_NAMES)
+    table_placeholders = ",".join("?" for _ in _CURRENT_TABLE_NAMES)
+    index_placeholders = ",".join("?" for _ in _CURRENT_INDEX_NAMES)
     row = conn.execute(
         f"""
         SELECT
-            COALESCE(SUM(CASE WHEN type = 'table' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN type = 'index' THEN 1 ELSE 0 END), 0)
-        FROM sqlite_master
-        WHERE name IN ({placeholders})
+            (SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name IN ({table_placeholders})),
+            (SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'index' AND name IN ({index_placeholders})),
+            (SELECT COUNT(*) FROM sqlite_master WHERE name = ?)
         """,
-        _V1_SCHEMA_NAMES,
+        (
+            *_CURRENT_TABLE_NAMES,
+            *_CURRENT_INDEX_NAMES,
+            _ARCHIVE_RECORD_JSON_INDEX_NAME,
+        ),
     ).fetchone()
     if row is None:
         return False
+    # 旧 JSON 索引必须已经删除；残留时按不完整处理，让修复流程回收它。
     return (
-        int(row[0]) == len(_V1_TABLE_NAMES)
-        and int(row[1]) == len(_V1_INDEX_NAMES)
+        int(row[0]) == len(_CURRENT_TABLE_NAMES)
+        and int(row[1]) == len(_CURRENT_INDEX_NAMES)
+        and int(row[2]) == 0
     )
 
 
@@ -276,14 +325,16 @@ def _unlink_reserved_backup(path: Path, reserved_stat: os.stat_result) -> None:
         path.unlink()
 
 
-_V1_SCHEMA_STATEMENTS = (
-    """
+_MIGRATIONS_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY,
         migration_id TEXT UNIQUE NOT NULL,
         applied_at TEXT NOT NULL
     )
-    """,
+    """
+
+_V1_SCHEMA_STATEMENTS = (
+    _MIGRATIONS_TABLE_SQL,
     """
     CREATE TABLE IF NOT EXISTS history_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -614,11 +665,165 @@ _V1_INDEX_NAMES = tuple(
 )
 _V1_SCHEMA_NAMES = (*_V1_TABLE_NAMES, *_V1_INDEX_NAMES)
 
+# ---- v2：archive_messages.record_hash ----
+#
+# v1 用完整 record_json 建索引做去重，索引体积约等于归档表本身。v2 改为
+# 32 位指纹的复合窄索引；旧索引在新索引建好后删除。v1 语句保持不变，
+# 便于旧库按历史顺序重放迁移。
+
+_ARCHIVE_RECORD_HASH_COLUMN = "record_hash"
+_ARCHIVE_RECORD_HASH_INDEX_NAME = "idx_archive_persona_record_hash"
+_ARCHIVE_RECORD_HASH_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_archive_persona_record_hash "
+    "ON archive_messages(persona_id, record_hash)"
+)
+_ARCHIVE_RECORD_JSON_INDEX_NAME = "idx_archive_record_json"
+_ARCHIVE_HASH_BACKFILL_BATCH = 1000
+
+# 当前版本需要存在的对象：v1 全部对象中去掉旧 JSON 索引，再加新指纹索引。
+_CURRENT_SCHEMA_STATEMENTS = tuple(
+    statement
+    for statement in _V1_SCHEMA_STATEMENTS
+    if _ARCHIVE_RECORD_JSON_INDEX_NAME not in statement
+)
+_TABLE_CREATION_STATEMENTS = tuple(
+    statement
+    for statement in _CURRENT_SCHEMA_STATEMENTS
+    if "CREATE TABLE IF NOT EXISTS" in statement
+)
+_CURRENT_TABLE_NAMES = _V1_TABLE_NAMES
+_CURRENT_INDEX_NAMES = tuple(
+    name for name in _V1_INDEX_NAMES if name != _ARCHIVE_RECORD_JSON_INDEX_NAME
+) + (_ARCHIVE_RECORD_HASH_INDEX_NAME,)
+_CURRENT_SCHEMA_NAMES = (*_CURRENT_TABLE_NAMES, *_CURRENT_INDEX_NAMES)
+
+
+def _ensure_archive_record_hash_column(conn: sqlite3.Connection) -> None:
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(archive_messages)")
+    }
+    if _ARCHIVE_RECORD_HASH_COLUMN in columns:
+        return
+    try:
+        with conn:
+            conn.execute(
+                f"ALTER TABLE archive_messages "
+                f"ADD COLUMN {_ARCHIVE_RECORD_HASH_COLUMN} TEXT"
+            )
+    except sqlite3.OperationalError as exc:
+        # 两个进程同时升级时，另一个进程可能刚加完这一列。
+        if "duplicate column name" not in str(exc).lower():
+            raise
+
+
+def _backfill_archive_record_hashes(conn: sqlite3.Connection) -> int:
+    """为存量行补写 record_hash；按 persona + rowid 分批，可中断续跑。"""
+
+    updated = 0
+    personas = conn.execute(
+        "SELECT DISTINCT persona_id FROM archive_messages "
+        "WHERE record_hash IS NULL AND record_json IS NOT NULL"
+    ).fetchall()
+    for (persona_id,) in personas:
+        # 覆盖所有 SQLite INTEGER 取值；旧导入库的 rowid 理论上可能非正。
+        last_rowid = -(2**63)
+        while True:
+            rows = conn.execute(
+                """
+                SELECT rowid, record_json FROM archive_messages
+                WHERE persona_id = ? AND rowid > ?
+                  AND record_hash IS NULL AND record_json IS NOT NULL
+                ORDER BY rowid
+                LIMIT ?
+                """,
+                (persona_id, last_rowid, _ARCHIVE_HASH_BACKFILL_BATCH),
+            ).fetchall()
+            if not rows:
+                break
+            conn.executemany(
+                f"UPDATE archive_messages SET {_ARCHIVE_RECORD_HASH_COLUMN} = ? "
+                "WHERE persona_id = ? AND rowid = ?",
+                [
+                    (archive_record_hash(str(row["record_json"])), persona_id, row["rowid"])
+                    for row in rows
+                ],
+            )
+            updated += len(rows)
+            last_rowid = int(rows[-1]["rowid"])
+            # 分批提交：迁移进程中断后，下次从剩余的 NULL 行继续。
+            conn.commit()
+            if len(rows) < _ARCHIVE_HASH_BACKFILL_BATCH:
+                break
+    if updated:
+        logger.info("karen.db 回填 archive_messages.record_hash: %s 行", updated)
+    return updated
+
+
+def _apply_v2_archive_record_hash(conn: sqlite3.Connection) -> None:
+    _ensure_archive_record_hash_column(conn)
+    _backfill_archive_record_hashes(conn)
+    conn.execute(_ARCHIVE_RECORD_HASH_INDEX_SQL)
+    conn.execute(f"DROP INDEX IF EXISTS {_ARCHIVE_RECORD_JSON_INDEX_NAME}")
+
+
+def _ensure_current_schema(conn: sqlite3.Connection) -> None:
+    """补建当前版本的表/索引，并保证指纹列与历史版本记录完整。
+
+    该入口只在 ``ensure_ready`` 发现版本或对象不完整时调用，正常热路径
+    不会执行。所有语句都是幂等的，可重复运行。
+    """
+
+    with conn:
+        for statement in _CURRENT_SCHEMA_STATEMENTS:
+            conn.execute(statement)
+    _ensure_archive_record_hash_column(conn)
+    _backfill_archive_record_hashes(conn)
+    with conn:
+        conn.execute(_ARCHIVE_RECORD_HASH_INDEX_SQL)
+        conn.execute(f"DROP INDEX IF EXISTS {_ARCHIVE_RECORD_JSON_INDEX_NAME}")
+        conn.execute(f"PRAGMA user_version = {KAREN_DB_SCHEMA_VERSION}")
+        for version, migration_id in _SCHEMA_MIGRATION_IDS:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO schema_migrations(
+                    version, migration_id, applied_at
+                )
+                VALUES (?, ?, ?)
+                """,
+                (version, migration_id, _utc_timestamp()),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class _SchemaMigration:
+    version: int
+    migration_id: str
+    statements: tuple[str, ...] = ()
+    apply: Callable[[sqlite3.Connection], None] | None = None
+
+
+_SCHEMA_MIGRATIONS = (
+    _SchemaMigration(
+        version=1,
+        migration_id=KAREN_DB_INITIAL_MIGRATION_ID,
+        statements=tuple(_V1_SCHEMA_STATEMENTS),
+    ),
+    _SchemaMigration(
+        version=2,
+        migration_id=KAREN_DB_ARCHIVE_HASH_MIGRATION_ID,
+        apply=_apply_v2_archive_record_hash,
+    ),
+)
+_SCHEMA_MIGRATION_IDS = tuple(
+    (migration.version, migration.migration_id) for migration in _SCHEMA_MIGRATIONS
+)
+
 
 __all__ = [
     "KAREN_DB_SCHEMA_VERSION",
     "KarenDB",
     "KarenDBSchemaVersion",
     "KarenDBVersionError",
+    "archive_record_hash",
     "backup_existing_database",
 ]

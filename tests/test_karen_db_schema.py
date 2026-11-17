@@ -45,6 +45,24 @@ def test_all_v1_schema_statements_are_tracked() -> None:
     assert len(set(_V1_SCHEMA_NAMES)) == len(_V1_SCHEMA_NAMES)
 
 
+def test_current_schema_names_replace_json_index() -> None:
+    from memory.karen_db import (
+        _CURRENT_SCHEMA_NAMES,
+        _CURRENT_SCHEMA_STATEMENTS,
+        _V1_SCHEMA_STATEMENTS,
+    )
+
+    assert len(set(_CURRENT_SCHEMA_NAMES)) == len(_CURRENT_SCHEMA_NAMES)
+    # 当前对象 = 所有建表/建索引语句（去掉旧 JSON 索引） + 专门的指纹索引。
+    assert len(_CURRENT_SCHEMA_NAMES) == len(_CURRENT_SCHEMA_STATEMENTS) + 1
+    assert any(
+        "idx_archive_record_json" in statement
+        for statement in _V1_SCHEMA_STATEMENTS
+    )
+    assert "idx_archive_record_json" not in _CURRENT_SCHEMA_NAMES
+    assert "idx_archive_persona_record_hash" in _CURRENT_SCHEMA_NAMES
+
+
 def test_ensure_ready_initializes_fresh_database(tmp_path) -> None:
     path = tmp_path / "karen.db"
 
@@ -172,6 +190,22 @@ def test_ensure_ready_repairs_missing_migration_row(tmp_path) -> None:
         assert int(row[0]) == KAREN_DB_SCHEMA_VERSION
     finally:
         conn.close()
+
+
+def test_load_is_idempotent_and_skips_migrations(tmp_path) -> None:
+    path = tmp_path / "karen.db"
+    db = KarenDB(path)
+    db.load()
+    db.close()
+
+    with patch.object(
+        KarenDB,
+        "ensure_schema",
+        side_effect=AssertionError("load() should not re-run migrations"),
+    ):
+        second = KarenDB(path)
+        second.load()
+        second.close()
 
 
 def test_ensure_ready_reopens_after_close(tmp_path) -> None:

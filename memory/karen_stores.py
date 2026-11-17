@@ -64,7 +64,7 @@ from .event_store import (
     _positive_int_or_none,
     _row_to_event,
 )
-from .karen_db import KarenDB
+from .karen_db import KarenDB, archive_record_hash
 
 logger = logging.getLogger(__name__)
 
@@ -844,6 +844,7 @@ class KarenArchiveStore:
                             normalized.reply_to_msg_id,
                             metadata_json,
                             record_json,
+                            archive_record_hash(record_json),
                             now,
                         )
                     )
@@ -866,9 +867,10 @@ class KarenArchiveStore:
                         date_key, month_key, conversation_id, conversation_type,
                         target_id, sender_id, sender_name, sender_role, direction,
                         message_kind, content, content_search, original_msg_id,
-                        reply_to_msg_id, metadata_json, record_json, created_at
+                        reply_to_msg_id, metadata_json, record_json,
+                        record_hash, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     message_rows,
                 )
@@ -897,21 +899,30 @@ class KarenArchiveStore:
         record_json_values = list(
             dict.fromkeys(_json_dumps(_normalize_record(record).record) for record in records)
         )
-        existing: set[str] = set()
-        for start in range(0, len(record_json_values), 500):
-            chunk = record_json_values[start:start + 500]
+        # 先用窄索引按 record_hash 取候选，再在内存里精确比对完整 JSON。
+        # 指纹碰撞只会多取回候选，不会导致误判重复。
+        hash_values = list(
+            dict.fromkeys(archive_record_hash(value) for value in record_json_values)
+        )
+        existing_json: set[str] = set()
+        for start in range(0, len(hash_values), 500):
+            chunk = hash_values[start:start + 500]
             if not chunk:
                 continue
             placeholders = _placeholders(len(chunk))
             rows = conn.execute(
                 f"""
                 SELECT record_json FROM archive_messages
-                WHERE persona_id = ? AND record_json IN ({placeholders})
+                WHERE persona_id = ? AND record_hash IN ({placeholders})
                 """,
                 [self.persona_id, *chunk],
             ).fetchall()
-            existing.update(str(row["record_json"]) for row in rows if row["record_json"])
-        return existing
+            existing_json.update(
+                str(row["record_json"]) for row in rows if row["record_json"]
+            )
+        if not existing_json:
+            return set()
+        return {value for value in record_json_values if value in existing_json}
 
     def _records_sync(self) -> list[dict]:
         with closing(self._connect()) as conn:

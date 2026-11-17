@@ -20,6 +20,10 @@
 
 ## Unreleased — 核心程序并入
 
+- 新增 `KarenDB.ensure_ready()`：基于版本与对象完整性的 schema 自检，替代 5 个 Store 每次建连重跑整套 DDL；空库、缺表、缺索引、缺迁移记录和外部切走 WAL 均可自愈。
+- `KarenEventStore` 连接补齐 `WAL` / `synchronous=NORMAL` / `foreign_keys`；并发建连的 `journal_mode` 设置改为进程内串行，避免 `database is locked`。
+- 对话页合并热点优化：发送去重增加廉价前缀守卫、ISO 时间戳快路径、缓存字节 O(1) 统计、每 runtime 并发加载锁；设备实测合并 1438ms → 678ms，缓存统计 429ms → 0.02ms，合并输出与旧实现逐字节一致。
+- karen.db schema 升至 v2：`archive_messages` 新增 `record_hash` 并回填，去重索引从完整 JSON 换成 `(persona_id, record_hash)` 窄索引；设备实测索引 2.47 MiB → 52 KiB，迁移耗时约 192ms（1026 行），可中断续跑。
 - `main.py`、`main_cli.py`、`service_cli.py`、`core/`、`features/`、`model_plugins/`、`plugins/`、`app_config/`、`adapters/`、`agents/`、`memory/`、`mind/`、`providers/`、`tools/`、`utils/`、`packaging/`、`deploy/`、`docs/` 等核心程序并入本仓库。
 - 本仓库现在提供“核心程序 + 后端”基础包；`gui/`、`webui/` 仍由各自模块仓库维护。
 - 在线安装可以直接下载本仓库源码包，再叠加所选界面模块，不需要额外的第四个仓库。

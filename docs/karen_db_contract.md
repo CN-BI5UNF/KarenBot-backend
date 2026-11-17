@@ -1,16 +1,33 @@
-# karen.db v1 契约
+# karen.db v2 契约
 
-本文档定义阶段 2 的 `karen.db` 基础契约：单库位置、版本记录、备份策略、v1 空表结构与索引。当前实现包含建库和版本/备份能力，以及 `KarenHistoryStore` 对 `history_records`、`KarenImportantStore` 对 `important_memories`、`KarenRollingSummaryStore` 对 `rolling_summary`、`KarenUsageStatsStore` 对 `usage_records`、`KarenEventStore` 对 `event_log`、`KarenArchiveStore` 对 `archive_messages` / `archive_message_media`、`KarenPersonaDB` 对 `persona_*` legacy domains 的最小读写；旧文件导入器覆盖 `history.jsonl`、`important.json`、`rolling_summary.json`、`model_usage.jsonl`、`events.sqlite3`、`events.sqlite3.append.jsonl`、`archive.sqlite3` 与 `persona.db`；runtime 已接线到每人格 `memory/<persona>/<persona>.db`。向量库/RAG 不并入 `karen.db`，运行时使用实例级 `vector/<persona>/rag_memory.sqlite3` 独立文件，随实例目录搬迁。
+本文档定义阶段 2 的 `karen.db` 基础契约：单库位置、版本记录、迁移、备份策略、v2 空表结构与索引。当前实现包含建库和版本/备份能力，以及 `KarenHistoryStore` 对 `history_records`、`KarenImportantStore` 对 `important_memories`、`KarenRollingSummaryStore` 对 `rolling_summary`、`KarenUsageStatsStore` 对 `usage_records`、`KarenEventStore` 对 `event_log`、`KarenArchiveStore` 对 `archive_messages` / `archive_message_media`、`KarenPersonaDB` 对 `persona_*` legacy domains 的最小读写；旧文件导入器覆盖 `history.jsonl`、`important.json`、`rolling_summary.json`、`model_usage.jsonl`、`events.sqlite3`、`events.sqlite3.append.jsonl`、`archive.sqlite3` 与 `persona.db`；runtime 已接线到每人格 `memory/<persona>/<persona>.db`。向量库/RAG 不并入 `karen.db`，运行时使用实例级 `vector/<persona>/rag_memory.sqlite3` 独立文件，随实例目录搬迁。
 
 ## 文件与版本
 
 - 目标文件由调用方显式传入；runtime 使用 `memory/<persona>/<persona>.db`。本模块不负责解析 `DATA_DIR`。
-- 当前 schema 版本：`1`，由 `memory.karen_db.KAREN_DB_SCHEMA_VERSION` 暴露。
+- 当前 schema 版本：`2`，由 `memory.karen_db.KAREN_DB_SCHEMA_VERSION` 暴露。
 - SQLite `PRAGMA user_version` 必须等于当前 schema 版本。
 - 内部迁移表：`schema_migrations(version, migration_id, applied_at)`。
-- v1 初始化迁移：`version = 1`，`migration_id = v1_initial_schema`。
-- 初始化必须幂等：重复 `load()` 不重复插入迁移记录。
+- 迁移记录：
+  - `version = 1`，`migration_id = v1_initial_schema`
+  - `version = 2`，`migration_id = v2_archive_record_hash`
+- 初始化必须幂等：重复 `load()` 不重复插入迁移记录，也不重复回填。
 - 打开已有库时，如果 `PRAGMA user_version` 或 `schema_migrations` 最大 `version` 高于当前代码支持版本，必须拒绝加载并抛出版本异常；禁止写入 schema，也禁止把版本号降级。
+- 普通读写热路径使用 `KarenDB.ensure_ready()`：只做版本与当前对象完整性检查，全部通过时不再执行 DDL；`KarenDB.load()` 保留“总是确保 schema 可用”的入口，供导入和显式管理使用。
+- 版本或对象不完整时，`ensure_ready()` 在同一进程锁内按顺序重放缺失迁移，并补建当前版本的表/索引；数据库被替换成空文件、部分缺表或缺索引时自动修复。
+
+## v1 → v2 迁移
+
+v2 只调整 `archive_messages` 的去重结构：
+
+1. 新增 `record_hash TEXT` 列，值为 `sha256(record_json).hexdigest()[:32]`。
+2. 为存量行分批回填 `record_hash`（每批 1000 行，按 `persona_id, rowid` 推进）；中断后下次从剩余 `NULL` 行继续。
+3. 建立 `idx_archive_persona_record_hash(persona_id, record_hash)`。
+4. 删除 `idx_archive_record_json(record_json)`。
+
+迁移可以在进程中断后重复执行：列存在性、索引创建、旧索引删除和回填都按幂等处理。迁移完成后 `PRAGMA user_version = 2`。迁移本身不调用 `VACUUM`；旧索引页会进入 freelist，需要回收磁盘时由存储维护流程统一执行。
+
+回滚到 v1 代码会被版本门禁拒绝（`KarenDBVersionError`），需要恢复迁移前的 `backups/` 备份。若必须原地降级，需要先重建旧 JSON 索引、删除 v2 迁移记录并把 `user_version` 设回 1；这属于手工运维操作，不在启动路径中自动执行。
 
 ## 连接 PRAGMA
 
@@ -23,7 +40,7 @@
 
 ## 备份策略
 
-`backup_existing_database()` 在迁移前备份整个 `karen.db` 到同级 `backups/` 目录：
+`backup_existing_database()` 在旧文件导入（可能伴随 schema 迁移）前备份整个 `karen.db` 到同级 `backups/` 目录：
 
 - 源库不存在时返回 `None`，且不创建空备份。
 - 文件名格式：`karen-v<schema_version>-<UTC timestamp>.db`。
@@ -380,6 +397,7 @@
 | reply_to_msg_id | TEXT |  |
 | metadata_json | TEXT |  |
 | record_json | TEXT |  |
+| record_hash | TEXT |  |
 | created_at | TEXT |  |
 
 约束：`PRIMARY KEY(persona_id, rowid)`；`UNIQUE(persona_id, archive_id)`。
@@ -391,7 +409,9 @@
 - `idx_archive_sender_time(persona_id, sender_id, timestamp_unix)`
 - `idx_archive_original_msg(persona_id, original_msg_id)`
 - `idx_archive_date(persona_id, date_key)`
-- `idx_archive_record_json(record_json)`
+- `idx_archive_persona_record_hash(persona_id, record_hash)`
+
+v1 的 `idx_archive_record_json(record_json)` 在 v2 迁移完成后删除。
 
 ### archive_message_media
 
@@ -435,7 +455,8 @@
 写入语义：
 
 - `append_many()` 复用旧 archive normalization/filter helper，只归档真实聊天记录，以及 tool `send_result` 中 `qq_visible is True` 的 outbound 发送结果；runtime、system、internal、未证明已外发的 assistant 文本不入库。
-- `record_json` 保存归一化后的完整记录 JSON。同一 persona 内按 `record_json` 去重；不同 persona 的去重空间互不影响。
+- `record_json` 保存归一化后的完整记录 JSON。同一 persona 内按 `record_json` 去重：写入方先按 `record_hash = sha256(record_json)[:32]` 命中候选行，再在内存中精确比对完整 JSON，指纹碰撞不会导致误判重复。不同 persona 的去重空间互不影响。
+- 导入器直接写入旧归档行时也必须填写 `record_hash`；`record_json` 为 `NULL` 的早期旧行保留 `record_hash = NULL`。
 - 当前 persona 的 `rowid` 从 `1` 连续递增，`archive_id` 使用旧短 ID 形态 `a1`、`a2` 等；不同 persona 独立分配。
 - 当前 persona 的 `archive_message_media.id` 从 `1` 连续递增，外键写入 `(persona_id, archive_id)`。
 

@@ -15,7 +15,7 @@ from typing import Any
 
 import orjson
 
-from .karen_db import KarenDB, backup_existing_database
+from .karen_db import KarenDB, archive_record_hash, backup_existing_database
 from .karen_stores import KarenHistoryStore, KarenImportantStore
 
 logger = logging.getLogger(__name__)
@@ -1183,9 +1183,10 @@ def _insert_archive_message_row(
             date_key, month_key, conversation_id, conversation_type,
             target_id, sender_id, sender_name, sender_role, direction,
             message_kind, content, content_search, original_msg_id,
-            reply_to_msg_id, metadata_json, record_json, created_at
+            reply_to_msg_id, metadata_json, record_json, record_hash,
+            created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             persona_id,
@@ -1209,6 +1210,9 @@ def _insert_archive_message_row(
             row.reply_to_msg_id,
             row.metadata_json,
             row.record_json,
+            archive_record_hash(row.record_json)
+            if row.record_json is not None
+            else None,
             row.created_at,
         ),
     )
