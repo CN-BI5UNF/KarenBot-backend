@@ -35,7 +35,12 @@ data_contract_epoch=0
 
 karen.db v1→v2 由 Runtime 首次访问时自动迁移，因此 `persona_db` 用
 `min_local_version=1` 允许 v1 启动；旧代码（manifest 仍为 persona_db=1）
-打开 v2 库会被 `supported_read` 上界拒绝。
+打开 v2 库会被 `supported_read` 上界拒绝。该迁移属于单平面版本升级，不推进
+`data_contract_epoch`；epoch 与 `migration_set_id` 保留给 D01 跨域迁移。
+
+旧版 trusted launcher 不识别 `min_local_version`，会把 `target_version=2`
+按严格相等处理，对 v1 库返回 `migration_required` 并拒绝启动（fail-closed）。
+受管部署需要同步更新 launcher；WebUI 直接启动的部署不受影响。
 
 D01 的隔离迁移目标约定为 `data_contract_epoch=1`、`migration_set_id=M001`；
 生产 M001 完成前仓库基线仍保持 0，不能用普通启动/更新自动推进。

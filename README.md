@@ -84,8 +84,8 @@ sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
 
 | 项目 | 版本 |
 |---|---|
-| 本仓库发布版本 | `v0.1.3-alpha` |
-| 应用代码版本 | `1.0.3-alpha` |
+| 本仓库发布版本 | `v0.1.9-alpha` |
+| 应用代码版本 | `1.0.9-alpha` |
 | 配套界面模块 | `v0.1.1-alpha.1` |
 
 `VERSION` 是模块发布版本，`backend/__init__.py` 中的代码版本沿用应用兼容版本。

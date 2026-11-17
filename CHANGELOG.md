@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.1.9-alpha — 2026-11-17
+
+后端模块版本 `v0.1.9-alpha`，应用代码版本 `1.0.9-alpha`。基于 `v0.1.3-alpha`。
+
+- karen.db schema 升至 v2：`archive_messages` 新增 `record_hash` 并分批回填，去重索引从完整 JSON 换成 `(persona_id, record_hash)` 窄索引；迁移可中断续跑，兼容门禁允许 v1 启动后自动迁移。设备实测索引 2.47 MiB → 52 KiB，1026 行迁移约 194ms，20k 行合成库约 1.85s。
+- 新增 `KarenDB.ensure_ready()`：基于版本与对象完整性的 schema 自检，替代多个 Store 每次建连重跑整套 DDL；空库、缺表、缺索引、缺迁移记录和外部切走 WAL 均可自愈。
+- `KarenEventStore` 连接补齐 `WAL` / `synchronous=NORMAL` / `foreign_keys`；并发建连的 `journal_mode` 设置改为进程内串行，避免 `database is locked`。
+- 对话页合并热点优化：发送去重增加廉价前缀守卫（只对 JSON `\u` 转义回退完整解析）、ISO 时间戳快路径、缓存字节 O(1) 统计、每 runtime 并发加载锁；设备实测合并 1438ms → 678ms，缓存统计 429ms → 0.02ms，合并输出与旧实现逐字节一致。
+- 归档与事件改为增量读取缓存：新增 `KarenArchiveStore.records_since()` 与 `KarenEventStore.event_id_bounds()`，刷新只读取新增行并在删除/窗口滑动时自动重载；设备实测追加后刷新 715ms（全量 1520ms）。
+- 对话页缓存复用会话分组结果，缓存命中时省掉约 250ms 的重复分组；设备实测命中 0.67ms。
+- 新增 `POST /api/storage/vacuum` 显式 VACUUM 入口：默认低于 1 MiB 空闲页跳过，检查磁盘空间，返回前后体积与回收字节；设备实测回收 2.95MB / 907ms。
+- 兼容门禁 `compatibility.json` 新增可选 `min_local_version`，`persona_db` 升到 v2 并允许 v1 自动迁移；旧版本 manifest 仍会拒绝 v2 库。
+- 新增 schema 自愈、v2 迁移、半迁移续跑、并发升级、归档去重、增量缓存、分组复用、VACUUM 与兼容区间测试；本地与设备全量测试通过。
+
 ## v0.1.3-alpha — 2026-11-16
 
 后端模块版本 `v0.1.3-alpha`，应用代码版本 `1.0.3-alpha`。基于 `v0.1.1-alpha.1`；界面模块仍由各自仓库独立发布。
@@ -20,10 +34,6 @@
 
 ## Unreleased — 核心程序并入
 
-- 新增 `KarenDB.ensure_ready()`：基于版本与对象完整性的 schema 自检，替代 5 个 Store 每次建连重跑整套 DDL；空库、缺表、缺索引、缺迁移记录和外部切走 WAL 均可自愈。
-- `KarenEventStore` 连接补齐 `WAL` / `synchronous=NORMAL` / `foreign_keys`；并发建连的 `journal_mode` 设置改为进程内串行，避免 `database is locked`。
-- 对话页合并热点优化：发送去重增加廉价前缀守卫、ISO 时间戳快路径、缓存字节 O(1) 统计、每 runtime 并发加载锁；设备实测合并 1438ms → 678ms，缓存统计 429ms → 0.02ms，合并输出与旧实现逐字节一致。
-- karen.db schema 升至 v2：`archive_messages` 新增 `record_hash` 并回填，去重索引从完整 JSON 换成 `(persona_id, record_hash)` 窄索引；设备实测索引 2.47 MiB → 52 KiB，迁移耗时约 192ms（1026 行），可中断续跑。
 - `main.py`、`main_cli.py`、`service_cli.py`、`core/`、`features/`、`model_plugins/`、`plugins/`、`app_config/`、`adapters/`、`agents/`、`memory/`、`mind/`、`providers/`、`tools/`、`utils/`、`packaging/`、`deploy/`、`docs/` 等核心程序并入本仓库。
 - 本仓库现在提供“核心程序 + 后端”基础包；`gui/`、`webui/` 仍由各自模块仓库维护。
 - 在线安装可以直接下载本仓库源码包，再叠加所选界面模块，不需要额外的第四个仓库。

@@ -24,6 +24,7 @@ build/
 *.egg-info/
 
 # === 核心程序并入后的用户运行数据 ===
+release/
 .karen-run/
 .debata-run/
 releases/
