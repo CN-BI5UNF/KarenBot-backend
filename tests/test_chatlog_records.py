@@ -181,6 +181,7 @@ def test_chat_page_cache_info_uses_precomputed_bytes() -> None:
         5.0,
         [{"content": "x"}],
         321,
+        [],
     )
     try:
         info = chat_page_cache_info()
@@ -291,6 +292,39 @@ async def test_chat_page_cache_rejects_recycled_runtime_id() -> None:
         loaded = await _load_chat_page_records(runtime)
 
         assert loaded and loaded[0]["content"] == "hello"
+    finally:
+        clear_chat_page_cache()
+
+
+@pytest.mark.asyncio
+async def test_grouping_is_reused_on_cache_hit(monkeypatch) -> None:
+    clear_chat_page_cache()
+    runtime = _FakeRuntimeWithRecord()
+    calls = 0
+    original = chat_records._group_records_by_conversation
+
+    def counting_group(records):
+        nonlocal calls
+        calls += 1
+        return original(records)
+
+    monkeypatch.setattr(
+        chat_records,
+        "_group_records_by_conversation",
+        counting_group,
+    )
+    try:
+        first_records, first_groups = (
+            await chat_records._load_chat_page_records_and_groups(runtime)
+        )
+        second_records, second_groups = (
+            await chat_records._load_chat_page_records_and_groups(runtime)
+        )
+
+        assert len(first_records) == 1
+        assert first_groups[0]["key"] == "private:1"
+        assert second_groups[0]["key"] == "private:1"
+        assert calls == 1
     finally:
         clear_chat_page_cache()
 

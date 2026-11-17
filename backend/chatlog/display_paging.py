@@ -30,10 +30,9 @@ from typing import Any
 
 from .display_items import _text_has_media_or_file
 from .display_pipeline import build_display_items, display_items_json
-from .grouping import _group_records_by_conversation
 from .media_refs import extract_media_attachments
 from .models import DisplayItem
-from .records import _load_chat_page_records
+from .records import _load_chat_page_records_and_groups
 
 logger = logging.getLogger(__name__)
 
@@ -317,14 +316,13 @@ async def get_display_page(
     cache = _cache_for_runtime(runtime)
     async with cache.lock:
         try:
-            all_records = await _load_chat_page_records(runtime)
+            all_records, grouped = await _load_chat_page_records_and_groups(runtime)
         except Exception as exc:  # noqa: BLE001
             logger.exception("读取会话记录失败")
             raise DisplayPageError(
                 "records_unavailable", f"读取会话记录失败：{exc}"
             ) from exc
 
-        grouped = _group_records_by_conversation(all_records)
         target = next(
             (item for item in grouped if item.get("key") == conversation_id),
             None,
@@ -985,8 +983,7 @@ async def warm_display_index(
         async with lock:
             if await _still_fresh():
                 return
-            all_records = await _load_chat_page_records(runtime)
-            grouped = _group_records_by_conversation(all_records)
+            all_records, grouped = await _load_chat_page_records_and_groups(runtime)
             target = next(
                 (item for item in grouped if item.get("key") == conversation_id),
                 None,

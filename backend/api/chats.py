@@ -32,9 +32,8 @@ from backend.chatlog.display_pipeline import (
     build_display_items,
     display_items_json,
 )
-from backend.chatlog.grouping import _group_records_by_conversation
 from backend.chatlog.media_refs import safe_remote_media_url
-from backend.chatlog.records import _load_chat_page_records
+from backend.chatlog.records import _load_chat_page_records_and_groups
 from features.vision.image_assets import (
     ImageAssetError,
     download_remote_image_bytes,
@@ -198,11 +197,10 @@ async def conversations(request: Request) -> dict[str, Any]:
     """侧栏会话列表（最近的排前面）。"""
     rt = require_runtime(request)
     try:
-        records = await _load_chat_page_records(rt)
+        records, grouped = await _load_chat_page_records_and_groups(rt)
     except Exception as e:  # noqa: BLE001
         logger.exception("读取会话记录失败")
         raise HTTPException(status_code=500, detail=f"读取会话记录失败：{e}") from e
-    grouped = _group_records_by_conversation(records)
     return {
         "conversations": [_conversation_summary(c) for c in grouped],
         "total_records": len(records),
@@ -246,11 +244,9 @@ async def conversation(
                 }
 
     try:
-        records = await _load_chat_page_records(rt)
+        records, grouped = await _load_chat_page_records_and_groups(rt)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"读取会话记录失败：{e}") from e
-
-    grouped = _group_records_by_conversation(records)
     target = next((c for c in grouped if c.get("key") == conversation_id), None)
     if target is None:
         return {"conversation": None, "records": [], "truncated": False}
@@ -415,12 +411,10 @@ async def display(
     """
     rt = require_runtime(request)
     try:
-        records = await _load_chat_page_records(rt)
+        records, grouped = await _load_chat_page_records_and_groups(rt)
     except Exception as e:  # noqa: BLE001
         logger.exception("读取会话记录失败")
         raise HTTPException(status_code=500, detail=f"读取会话记录失败：{e}") from e
-
-    grouped = _group_records_by_conversation(records)
     target = next((c for c in grouped if c.get("key") == conversation_id), None)
     if target is None:
         return {

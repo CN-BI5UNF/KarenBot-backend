@@ -17,7 +17,12 @@ from typing import Any
 import orjson
 
 from .display_items import _parse_float_value, _record_timestamp_sort_value
-from .grouping import _LEGACY_HEADER_RE, _conversation_info, _record_role
+from .grouping import (
+    _LEGACY_HEADER_RE,
+    _conversation_info,
+    _group_records_by_conversation,
+    _record_role,
+)
 from .models import DisplaySeverity
 from .text_format import (
     _compact_inline_tokens,
@@ -50,7 +55,14 @@ _EVENT_CATCHUP_BATCH = 1000
 _CHAT_PAGE_CACHE_TTL_SECONDS = 10.0
 _chat_page_cache: dict[
     tuple[int, int, int],
-    tuple[weakref.ReferenceType[Any], int, float, list[dict], int],
+    tuple[
+        weakref.ReferenceType[Any],
+        int,
+        float,
+        list[dict],
+        int,
+        list[dict],
+    ],
 ] = {}
 _CHAT_PAGE_LOCKS: weakref.WeakKeyDictionary[Any, asyncio.Lock] = (
     weakref.WeakKeyDictionary()
@@ -219,9 +231,14 @@ def chat_page_cache_info() -> dict[str, int]:
     """对话页合并缓存的可回收规模；只统计条目与近似字节，不返回正文。"""
     approx_bytes = 0
     record_count = 0
-    for _runtime_ref, _history_length, _stamp, records, records_bytes in (
-        _chat_page_cache.values()
-    ):
+    for (
+        _runtime_ref,
+        _history_length,
+        _stamp,
+        records,
+        records_bytes,
+        _grouped,
+    ) in _chat_page_cache.values():
         record_count += len(records)
         approx_bytes += records_bytes
     return {
@@ -259,16 +276,31 @@ def _chat_page_lock(runtime: Any) -> asyncio.Lock:
 
 
 async def _load_chat_page_records(runtime: Any) -> list[dict]:
-    """读取对话页合并记录。
+    """读取对话页合并记录。"""
+
+    records, _grouped = await _load_chat_page_records_and_groups(runtime)
+    return records
+
+
+async def _load_chat_page_records_and_groups(
+    runtime: Any,
+) -> tuple[list[dict], list[dict]]:
+    """读取对话页合并记录及会话分组，并复用同一份缓存。
 
     同一 runtime 的并发请求（侧栏、对话页、多个标签页）共用一个加载锁，
-    避免在缓存同时失效时重复跑数秒的加载与合并管线。
+    避免在缓存同时失效时重复跑数秒的加载、合并与分组管线。
     """
+
     async with _chat_page_lock(runtime):
-        return await _load_chat_page_records_locked(runtime)
+        return await _load_chat_page_locked(runtime)
 
 
 async def _load_chat_page_records_locked(runtime: Any) -> list[dict]:
+    records, _grouped = await _load_chat_page_locked(runtime)
+    return records
+
+
+async def _load_chat_page_locked(runtime: Any) -> tuple[list[dict], list[dict]]:
     started_at = time.perf_counter()
     history = getattr(runtime, "history", None)
     history_length = 0
@@ -296,7 +328,7 @@ async def _load_chat_page_records_locked(runtime: Any) -> list[dict]:
         and cached[1] == history_length
         and now - cached[2] <= _CHAT_PAGE_CACHE_TTL_SECONDS
     ):
-        return list(cached[3])
+        return list(cached[3]), list(cached[5])
 
     step_started_at = now
     history_records = list(await history.records() or []) if history is not None else []
@@ -332,16 +364,21 @@ async def _load_chat_page_records_locked(runtime: Any) -> list[dict]:
         history_records=history_records,
     )
     merge_elapsed_ms = (time.perf_counter() - step_started_at) * 1000
+    step_started_at = time.perf_counter()
+    grouped = await asyncio.to_thread(_group_records_by_conversation, records)
+    group_elapsed_ms = (time.perf_counter() - step_started_at) * 1000
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "对话页记录加载指标 history_ms=%.3f event_store_ms=%.3f timeline_ms=%.3f "
-            "archive_ms=%.3f merge_tag_ms=%.3f total_ms=%.3f history_records=%d "
-            "event_store_records=%d timeline_records=%d archive_records=%d total_records=%d",
+            "archive_ms=%.3f merge_tag_ms=%.3f group_ms=%.3f total_ms=%.3f "
+            "history_records=%d event_store_records=%d timeline_records=%d "
+            "archive_records=%d total_records=%d",
             history_elapsed_ms,
             event_elapsed_ms,
             timeline_elapsed_ms,
             archive_elapsed_ms,
             merge_elapsed_ms,
+            group_elapsed_ms,
             (time.perf_counter() - started_at) * 1000,
             len(history_records),
             len(event_records),
@@ -356,11 +393,12 @@ async def _load_chat_page_records_locked(runtime: Any) -> list[dict]:
             time.monotonic(),
             records,
             await asyncio.to_thread(_estimate_records_bytes, records),
+            grouped,
         )
         if len(_chat_page_cache) > 8:
             for stale_key in list(_chat_page_cache)[:-8]:
                 _chat_page_cache.pop(stale_key, None)
-    return records
+    return records, grouped
 
 
 async def _load_event_store_records(runtime: Any) -> list[dict[str, Any]]:
