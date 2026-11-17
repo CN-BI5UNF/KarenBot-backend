@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from core.storage_maintenance import (
     CATEGORY_SPECS,
+    VACUUM_MIN_RECLAIM_BYTES,
     StorageMaintenanceError,
     StorageMaintenanceService,
 )
@@ -36,6 +37,15 @@ class CleanupExecutePayload(BaseModel):
     confirmation_token: str = Field(min_length=8, max_length=256)
     idempotency_key: str = Field(min_length=1, max_length=200)
     expected_generation: str = Field(min_length=8, max_length=128)
+
+
+class VacuumPayload(BaseModel):
+    min_reclaim_bytes: int = Field(
+        default=VACUUM_MIN_RECLAIM_BYTES,
+        ge=0,
+        le=1024 * 1024 * 1024,
+    )
+    force: bool = False
 
 
 def _service(request: Request) -> StorageMaintenanceService:
@@ -62,8 +72,14 @@ def _http_error(exc: StorageMaintenanceError) -> HTTPException:
         status = 409
     elif exc.code in {"unknown_category", "category_not_implemented", "empty_categories"}:
         status = 422
-    elif exc.code == "restore_not_supported":
+    elif exc.code in {"restore_not_supported", "vacuum_busy"}:
         status = 409
+    elif exc.code == "database_missing":
+        status = 404
+    elif exc.code == "vacuum_no_space":
+        status = 507
+    elif exc.code == "vacuum_failed":
+        status = 500
     else:
         status = 400
     return HTTPException(
@@ -101,6 +117,23 @@ def _public_job(job: dict[str, Any] | None) -> dict[str, Any] | None:
 @router.get("/usage")
 async def usage(request: Request) -> dict[str, Any]:
     return await _service(request).usage()
+
+
+@router.post("/vacuum")
+async def vacuum(
+    request: Request,
+    payload: VacuumPayload | None = None,
+) -> dict[str, Any]:
+    """对当前人格 karen.db 执行 VACUUM，回收空闲页。"""
+
+    options = payload or VacuumPayload()
+    try:
+        return await _service(request).vacuum_karen_db(
+            min_reclaim_bytes=options.min_reclaim_bytes,
+            force=options.force,
+        )
+    except StorageMaintenanceError as exc:
+        raise _http_error(exc) from exc
 
 
 @router.get("/categories")

@@ -69,6 +69,7 @@ RAG bootstrap 与导出仍保留全量兼容路径。
 |---|---|---|
 | GET | `/api/storage/usage` | 分类占用、磁盘水位、内存缓存、history 统计 |
 | GET | `/api/storage/categories` | 类别与保护/实现状态 |
+| POST | `/api/storage/vacuum` | 显式 VACUUM 当前人格 karen.db；默认低于 1 MiB 空闲页时跳过 |
 | POST | `/api/storage/cleanup/preview` | 冻结候选，返回 preview_id/令牌/代次/预计字节 |
 | POST | `/api/storage/cleanup/execute` | 202 + job；需要 preview_id、令牌、幂等键、代次 |
 | GET | `/api/storage/jobs` | 最近任务 |
@@ -80,6 +81,22 @@ RAG bootstrap 与导出仍保留全量兼容路径。
 预览默认 5 分钟过期。执行时对每个磁盘候选再次校验：路径仍在受管根目录内、
 不是符号链接、大小与 mtime_ns 与预览一致。变化项跳过并在结果中计数，不会
 “猜着删”。
+
+## VACUUM
+
+`POST /api/storage/vacuum` 对当前人格 `karen.db` 执行显式 VACUUM，用于回收
+schema 迁移、物理删除后留下的空闲页。它不是自动维护动作：
+
+- 请求体可选 `min_reclaim_bytes`（默认 1 MiB）与 `force`。空闲页低于阈值时
+  返回 `skipped=true, reason=below_threshold`，`force=true` 可强制执行。
+- 执行前检查磁盘可用空间：VACUUM 需要约等于主库大小的临时空间，不足时返回
+  507 `vacuum_no_space`。
+- 执行时先 `wal_checkpoint(TRUNCATE)`，再 `VACUUM`，最后再次 checkpoint；
+  期间持有写锁，数据库被其他写入占用时返回 409 `vacuum_busy`。
+- 返回 `before_bytes`、`after_bytes`、`reclaimed_bytes`、前后
+  `freelist_bytes` 与 `elapsed_ms`，不返回任何聊天正文。
+- `GET /api/storage/usage` 的 `vacuum` 字段会给出 `recommended` 与当前
+  `freelist_bytes`，前端可据此提示用户，但不会自动执行。
 
 ## 上下文预算
 

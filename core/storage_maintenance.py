@@ -17,6 +17,7 @@ import logging
 import os
 import secrets
 import shutil
+import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -33,6 +34,9 @@ from memory.maintenance_store import (
 logger = logging.getLogger(__name__)
 
 PREVIEW_TTL_SECONDS = 300
+# VACUUM 会临时占用与主库相当的磁盘空间；低于阈值时不建议执行。
+VACUUM_MIN_RECLAIM_BYTES = 1024 * 1024
+VACUUM_SPACE_FACTOR = 2
 
 IMAGE_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".heif", ".avif"}
@@ -168,6 +172,7 @@ class StorageMaintenanceService:
         self._start_lock = asyncio.Lock()
         self._tasks: dict[str, asyncio.Task] = {}
         self._cancel_requested: set[str] = set()
+        self._vacuum_lock = asyncio.Lock()
 
     async def ensure_started(self) -> None:
         if self._started:
@@ -245,6 +250,7 @@ class StorageMaintenanceService:
         )
         disk_usage = _disk_usage(self.paths.DATA_DIR)
         low_disk = _low_disk_state(disk_usage, cfg)
+        freelist_bytes = int(history_stats.get("db_freelist_bytes") or 0)
         return {
             "generated_at": _iso_now(),
             "data_dir": str(self.paths.DATA_DIR),
@@ -255,6 +261,11 @@ class StorageMaintenanceService:
             "reclaimable_bytes": reclaimable_bytes,
             "memory_caches": memory,
             "history": history_stats,
+            "vacuum": {
+                "recommended": freelist_bytes >= VACUUM_MIN_RECLAIM_BYTES,
+                "freelist_bytes": freelist_bytes,
+                "min_reclaim_bytes": VACUUM_MIN_RECLAIM_BYTES,
+            },
             "maintenance": {
                 "mode": str(getattr(cfg, "mode", "inventory_only")),
                 "temp_hours": int(getattr(cfg, "temp_hours", 24)),
@@ -266,6 +277,126 @@ class StorageMaintenanceService:
                 "automatic_cleanup": False,
             },
             "complete": True,
+        }
+
+    # ------------------------------------------------------------------
+    # VACUUM（显式维护动作）
+    # ------------------------------------------------------------------
+    def _persona_db_path(self) -> Path | None:
+        persona = getattr(self.rt, "persona", None)
+        name = str(getattr(persona, "name", "") or "").strip()
+        memory_dir_for = getattr(self.paths, "memory_dir_for", None)
+        if not name or not callable(memory_dir_for):
+            return None
+        return Path(memory_dir_for(name)) / f"{name}.db"
+
+    async def vacuum_karen_db(
+        self,
+        *,
+        min_reclaim_bytes: int = VACUUM_MIN_RECLAIM_BYTES,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """对当前人格 karen.db 执行 VACUUM，回收迁移/删除留下的空闲页。
+
+        VACUUM 是显式动作而不是自动维护：它需要约等于主库大小的临时空间，
+        并会在执行期间持有写锁。低于 ``min_reclaim_bytes`` 时默认跳过，
+        ``force=True`` 可强制执行。
+        """
+
+        await self.ensure_started()
+        if self._vacuum_lock.locked():
+            raise StorageMaintenanceError(
+                "vacuum_busy", "已有 VACUUM 正在执行，请稍后重试"
+            )
+        threshold = max(0, int(min_reclaim_bytes))
+        async with self._vacuum_lock:
+            return await asyncio.to_thread(
+                self._vacuum_sync,
+                threshold,
+                bool(force),
+            )
+
+    def _vacuum_sync(
+        self,
+        min_reclaim_bytes: int,
+        force: bool,
+    ) -> dict[str, Any]:
+        db_path = self._persona_db_path()
+        if db_path is None or not db_path.is_file():
+            raise StorageMaintenanceError(
+                "database_missing", "当前人格的 karen.db 不存在"
+            )
+        before_bytes = db_path.stat().st_size
+        disk = shutil.disk_usage(db_path.parent)
+        required_free = before_bytes * VACUUM_SPACE_FACTOR
+        if disk.free < required_free:
+            raise StorageMaintenanceError(
+                "vacuum_no_space",
+                f"可用空间不足：VACUUM 需要约 {required_free} 字节，"
+                f"当前仅 {disk.free} 字节",
+            )
+
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(db_path, timeout=30)
+            conn.execute("PRAGMA busy_timeout=30000")
+            freelist_before = _freelist_bytes(conn)
+            if not force and freelist_before < min_reclaim_bytes:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "below_threshold",
+                    "path": str(db_path),
+                    "before_bytes": before_bytes,
+                    "after_bytes": before_bytes,
+                    "reclaimed_bytes": 0,
+                    "freelist_before_bytes": freelist_before,
+                    "freelist_after_bytes": freelist_before,
+                    "min_reclaim_bytes": min_reclaim_bytes,
+                }
+            started = time.perf_counter()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.execute("VACUUM")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            freelist_after = _freelist_bytes(conn)
+        except sqlite3.OperationalError as exc:
+            message = str(exc)
+            lowered = message.lower()
+            if "locked" in lowered or "busy" in lowered:
+                raise StorageMaintenanceError(
+                    "vacuum_busy",
+                    "数据库正被其他写入占用，请稍后重试",
+                ) from exc
+            raise StorageMaintenanceError(
+                "vacuum_failed", f"VACUUM 失败：{message}"
+            ) from exc
+        finally:
+            if conn is not None:
+                conn.close()
+
+        after_bytes = db_path.stat().st_size
+        reclaimed = max(0, before_bytes - after_bytes)
+        logger.info(
+            "karen.db VACUUM 完成 path=%s before=%s after=%s reclaimed=%s elapsed_ms=%.1f",
+            db_path,
+            before_bytes,
+            after_bytes,
+            reclaimed,
+            elapsed_ms,
+        )
+        return {
+            "ok": True,
+            "skipped": False,
+            "reason": "",
+            "path": str(db_path),
+            "before_bytes": before_bytes,
+            "after_bytes": after_bytes,
+            "reclaimed_bytes": reclaimed,
+            "freelist_before_bytes": freelist_before,
+            "freelist_after_bytes": freelist_after,
+            "elapsed_ms": round(elapsed_ms, 1),
+            "min_reclaim_bytes": min_reclaim_bytes,
         }
 
     async def _memory_cache_usage(self) -> dict[str, dict[str, int]]:
@@ -961,6 +1092,12 @@ def _generation_for(categories: list[str], items: list[dict[str, Any]]) -> str:
         digest.update(str(item.get("mtime_ns") or "").encode("ascii"))
         digest.update(b"\x00")
     return digest.hexdigest()
+
+
+def _freelist_bytes(conn: sqlite3.Connection) -> int:
+    page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+    freelist = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+    return page_size * freelist
 
 
 def _disk_usage(path: Path) -> dict[str, Any]:
