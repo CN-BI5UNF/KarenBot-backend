@@ -1,15 +1,15 @@
 """GitHub Releases 代码更新 API。
 
 更新器只操作代码仓库；用户数据目录通过 AppPaths 与项目根分离。
-check 需要用户确认后才 apply；apply 前再次核对 token、目标 commit、工作树。
-所有版本来自远端 tag（与 GitHub Releases 使用同一组 tag），更新日志来自
-``releases/<tag>.md``。
+check 需要用户确认后才 apply；apply 前再次核对 token 与目标版本。
+模块更新采用文件级叠加，不覆盖 data/、personas/、plugins/、config.yaml 等
+用户数据；工作树有本地改动也不会阻止更新，重叠文件会先备份再覆盖。
+所有版本来自远端 tag（与 GitHub Releases 使用同一组 tag）。
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Annotated, Any
@@ -105,9 +105,6 @@ def build_module_service(host: Any) -> ModuleUpdateService | None:
             timeout_seconds=timeout,
             check_interval_days=interval,
             restart_callback=restart_backend_callback,
-            allow_development_tree=(
-                os.environ.get("KAREN_ALLOW_MODULE_UPDATE_DIRTY") == "1"
-            ),
         )
     except ModuleUpdateError as exc:
         logger.warning("模块更新服务不可用：%s", exc)

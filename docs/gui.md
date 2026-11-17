@@ -254,7 +254,7 @@ GUI 的「设置 → 更新」现在按**独立模块仓库**工作，而不是�
 | 后端 | `https://github.com/CN-BI5UNF/KarenBot-backend` |
 | GUI 前端 | `https://github.com/CN-BI5UNF/KarenBot-GUI` |
 
-更新只替换应用根目录下的 `backend/` 与 `gui/`，不会改动 `core/` 等宿主运行时，也不会覆盖用户数据。更新前会把当前模块备份到数据目录的 `module_backups/<时间戳>/`。
+后端发布包包含完整后端程序（`backend/`、`core/`、`memory/`、`providers/`、`tools/` 等）；更新按白名单把发布文件叠加到应用根目录，前端只更新 `gui/` 或 `webui/`。`data/`、`personas/`、`plugins/`、`config.yaml` 等用户数据不会被覆盖，更新也不会删除文件。每个被替换的旧文件都会先备份到数据目录的 `module_backups/<时间戳>/`。
 
 ### Latest 与 Pre-release
 
@@ -277,5 +277,9 @@ GUI 的「设置 → 更新」现在按**独立模块仓库**工作，而不是�
 
 - 仅后端更新：刷新/重启 GUI 本地后端即可加载新的 Python 代码。
 - GUI 前端更新：必须完全退出并重新打开 GUI；仅重启后端不会替换已经加载的界面代码。
-- 当前是带未提交改动的开发检出时，更新会被拒绝。测试时可用
-  `KAREN_ALLOW_MODULE_UPDATE_DIRTY=1` 显式允许覆盖（危险，仅用于测试）。
+- 工作树有未提交改动不会阻止更新。更新采用文件级叠加，只覆盖发布包中的
+  程序文件；与更新范围重叠的本地改动会先逐个备份到
+  `数据目录/module_backups/<时间戳>/`，再写入发布版，便于恢复。
+- `data/`、`personas/`、`plugins/`、`config.yaml` 等用户数据不在更新白名单内，
+  更新不会覆盖或删除它们；更新也不会删除任何旧文件。控制台会显示工作树的
+  已改动/未跟踪/未改动文件数。

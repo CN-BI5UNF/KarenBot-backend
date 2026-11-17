@@ -84,8 +84,8 @@ sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
 
 | 项目 | 版本 |
 |---|---|
-| 本仓库发布版本 | `v0.1.9-alpha` |
-| 应用代码版本 | `1.0.9-alpha` |
+| 本仓库发布版本 | `v0.1.11-alpha` |
+| 应用代码版本 | `1.0.11-alpha` |
 | 配套界面模块 | `v0.1.1-alpha.1` |
 
 `VERSION` 是模块发布版本，`backend/__init__.py` 中的代码版本沿用应用兼容版本。
@@ -96,7 +96,7 @@ sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
 - 不提交 `config.yaml`、`secrets.enc`、访问令牌、API Key、RSA 私钥、聊天记录或日志。
 - 用户人格、表情包、模型权重和 `data/` 属于用户数据，不进入仓库。
 - 后端 API 默认需要令牌；不要把控制面直接暴露到不可信网络。
-- 更新器只替换 `backend/`；核心程序更新通过安装器或新的核心基础包完成。
+- 模块更新器按白名单叠加完整后端程序（`backend/`、`core/`、`memory/` 等），只写程序文件；`data/`、`personas/`、`plugins/`、`config.yaml` 等用户数据不变，被替换的文件会先备份。
 
 ## 许可证
 

@@ -3,12 +3,16 @@
 The legacy :mod:`core.updater` updates one combined git checkout.  This module
 handles the split distribution:
 
-* ``KarenBot-backend`` provides ``backend/``;
+* ``KarenBot-backend`` provides the complete backend program (``backend/``,
+  ``core/``, ``memory/``, providers, tools, ...);
 * ``KarenBot-GUI`` provides ``gui/``;
 * ``KarenBot-WebUI`` provides ``webui/``.
 
-Only the module directories are replaced.  Host runtime code (``core/``,
-``providers/``, ...) and user data are never touched.
+Updates are applied as a file-level overlay: program files are written, but
+nothing is deleted.  User data (``data/``, ``personas/``, ``plugins/``,
+``config.yaml``, ...) is never part of the update whitelist.  Uncommitted
+local changes no longer block the update, but every overwritten file is backed
+up first so local edits can be recovered.
 
 GitHub Releases are the source of truth so the updater can distinguish
 ``Latest`` from ``Pre-release``.  Automatic notifications only use Latest
@@ -27,6 +31,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -50,6 +55,71 @@ MODULE_REPOS = {
 }
 MODULE_DIRS = {"backend": "backend", "gui": "gui", "webui": "webui"}
 MODULE_LABELS = {"backend": "后端", "gui": "GUI 前端", "webui": "WebUI 前端"}
+
+# KarenBot-backend 发布包包含完整后端程序。更新时只覆盖这些程序条目，
+# 其余顶层条目一律保留（用户数据、人格、配置、插件、备份等）。
+BACKEND_UPDATE_ENTRIES = (
+    "backend",
+    "core",
+    "memory",
+    "mind",
+    "agents",
+    "providers",
+    "tools",
+    "utils",
+    "features",
+    "adapters",
+    "app_config",
+    "model_plugins",
+    "deploy",
+    "docs",
+    "scripts",
+    "packaging",
+    "tests",
+    "main.py",
+    "main_cli.py",
+    "service_cli.py",
+    "webui_server.py",
+    "karen",
+    "debata",
+    "compatibility.json",
+    "VERSION",
+    "pyproject.toml",
+    "uv.lock",
+    "README.md",
+    "README_EN.md",
+    "CHANGELOG.md",
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "NOTICE",
+)
+# 兼容/展示用：这些顶层条目即使出现在发布包里也不会被写入。
+BACKEND_PRESERVED_ENTRIES = (
+    "data",
+    "logs",
+    "personas",
+    "plugins",
+    "workspace",
+    "config.yaml",
+    "config_backups",
+    "secrets.enc",
+    "secrets.key",
+    ".env",
+    ".venv",
+    "venv",
+    ".git",
+    ".github",
+    ".gitignore",
+    "modules.json",
+    "release",
+    "releases",
+    "backups",
+    "cache",
+    "tmp",
+    ".karen-run",
+    ".debata-run",
+)
 FRONTEND_COMPONENT = {"gui": "gui", "webui": "webui"}
 FRONTEND_LABELS = {"gui": "GUI 版本", "webui": "WebUI 版本"}
 DEFAULT_INTERVAL_DAYS = 9
@@ -80,6 +150,58 @@ def _safe_tag(tag: str) -> bool:
         and not tag.endswith(".lock")
         and "\\" not in tag
     )
+
+
+def _is_link_like(path: Path) -> bool:
+    """Detect symlinks and Windows reparse points (junctions) portably.
+
+    ``Path.is_junction`` only exists on Python 3.12+, so Windows junctions are
+    detected via ``lstat().st_file_attributes`` instead.
+    """
+
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # If the type cannot be determined, treat it as unsafe.
+        return True
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    if os.name == "nt":
+        reparse_flag = getattr(
+            stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+        )
+        if getattr(info, "st_file_attributes", 0) & reparse_flag:
+            return True
+    return False
+
+
+def _parse_git_status_payload(payload: bytes) -> list[tuple[str, str]]:
+    """Parse ``git status --porcelain=v1 -z`` into ``(status, path)`` pairs.
+
+    NUL-separated output avoids quoting problems with spaces and non-ASCII
+    filenames.  Rename/copy entries carry the original path as an extra token
+    which must be skipped.
+    """
+
+    tokens = payload.split(b"\0")
+    entries: list[tuple[str, str]] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if len(token) < 4:
+            continue
+        status = token[:2].decode("ascii", errors="replace")
+        path = token[3:].decode("utf-8", errors="surrogateescape")
+        path = path.replace("\\", "/").strip("/")
+        if not path:
+            continue
+        entries.append((status, path))
+        if "R" in status or "C" in status:
+            index += 1
+    return entries
 
 
 def _version_key(value: str | None):
@@ -145,11 +267,23 @@ def _write_manifest_atomic(project_root: Path, manifest: dict[str, Any]) -> None
 
 
 def _read_module_version(project_root: Path, component: str) -> str:
-    path = project_root / MODULE_DIRS[component] / "VERSION"
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+    if component == "backend":
+        # 完整后端发布包把 VERSION 放在仓库根目录；旧布局的
+        # backend/VERSION 作为后备。
+        candidates = [
+            project_root / "VERSION",
+            project_root / MODULE_DIRS[component] / "VERSION",
+        ]
+    else:
+        candidates = [project_root / MODULE_DIRS[component] / "VERSION"]
+    for path in candidates:
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return ""
 
 
 def _release_body(value: Any) -> str:
@@ -382,7 +516,6 @@ class ModuleUpdateService:
         timeout_seconds: int = 60,
         check_interval_days: int = DEFAULT_INTERVAL_DAYS,
         restart_callback: Callable[[], Any] | None = None,
-        allow_development_tree: bool = False,
     ) -> None:
         if frontend not in FRONTEND_COMPONENT:
             raise ModuleUpdateError("invalid_frontend", "未知的前端类型")
@@ -403,7 +536,6 @@ class ModuleUpdateService:
         self.timeout_seconds = max(10, min(300, int(timeout_seconds)))
         self.check_interval_days = max(1, min(365, int(check_interval_days)))
         self.restart_callback = restart_callback
-        self.allow_development_tree = bool(allow_development_tree)
         self._lock = asyncio.Lock()
         self._plan: dict[str, Any] | None = None
         self._catalog_cache: tuple[float, dict[str, Any]] | None = None
@@ -418,9 +550,13 @@ class ModuleUpdateService:
     def _installed(self, component: str) -> dict[str, Any]:
         entry = self._manifest()["components"].get(component) or {}
         tag = str(entry.get("tag") or "")
-        version = str(entry.get("version") or "") or _read_module_version(
-            self.project_root, component
-        )
+        version = str(entry.get("version") or "")
+        if not version and tag:
+            # A recorded tag is authoritative.  Do not let a partially
+            # installed VERSION file hide a still-pending update.
+            version = tag.lstrip("vV")
+        if not version:
+            version = _read_module_version(self.project_root, component)
         return {
             "tag": tag,
             "version": version,
@@ -591,22 +727,97 @@ class ModuleUpdateService:
             f"前端 {frontend_text}"
         )
 
-    def _development_dirty(self) -> bool:
+    def _worktree_summary(self) -> dict[str, Any]:
+        """统计工作树改动/未改动文件数；非 Git 安装返回 available=False。
+
+        ``dirty_count`` 是已改动+未跟踪文件总数，``tracked_dirty_count``
+        只统计已跟踪文件的改动，``clean_count`` 是受控文件中未改动的数量。
+        """
+
         if not (self.project_root / ".git").exists():
-            return False
-        if self.allow_development_tree:
-            return False
+            return {
+                "available": False,
+                "dirty": False,
+                "dirty_count": 0,
+                "tracked_dirty_count": 0,
+                "untracked_count": 0,
+                "clean_count": 0,
+                "tracked_count": 0,
+                "clean_percent": 0.0,
+                "text": "非 Git 安装，无法统计工作树文件",
+            }
         try:
-            result = subprocess.run(
-                ["git", "-C", str(self.project_root), "status", "--porcelain"],
+            status = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(self.project_root),
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=normal",
+                ],
                 capture_output=True,
-                text=True,
                 timeout=15,
                 check=False,
             )
-            return bool(result.stdout.strip())
+            tracked = subprocess.run(
+                ["git", "-C", str(self.project_root), "ls-files", "-z"],
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+            if status.returncode != 0 or tracked.returncode != 0:
+                raise OSError("git status/ls-files failed")
+            entries = _parse_git_status_payload(status.stdout)
+            tracked_count = len(
+                [path for path in tracked.stdout.split(b"\0") if path]
+            )
         except (OSError, subprocess.SubprocessError):
-            return True
+            return {
+                "available": True,
+                "dirty": True,
+                "dirty_count": 0,
+                "tracked_dirty_count": 0,
+                "untracked_count": 0,
+                "clean_count": 0,
+                "tracked_count": 0,
+                "clean_percent": 0.0,
+                "error": "git_status_failed",
+                "text": "无法读取 Git 工作树状态",
+            }
+        untracked = sum(1 for status_text, _path in entries if status_text == "??")
+        changed_tracked = len(entries) - untracked
+        clean = max(0, tracked_count - changed_tracked)
+        percent = round(clean / tracked_count * 100, 2) if tracked_count else 0.0
+        dirty_count = len(entries)
+        return {
+            "available": True,
+            "dirty": bool(entries),
+            "dirty_count": dirty_count,
+            "tracked_dirty_count": changed_tracked,
+            "untracked_count": untracked,
+            "clean_count": clean,
+            "tracked_count": tracked_count,
+            "clean_percent": percent,
+            "text": (
+                f"工作树共 {tracked_count} 个受控文件："
+                f"未改动 {clean} 个、已改动 {changed_tracked} 个、"
+                f"未跟踪 {untracked} 个"
+                "（相对本地 Git HEAD，可能包含以前更新写入但未提交的文件）"
+            ),
+        }
+
+    @staticmethod
+    def _worktree_text(worktree: dict[str, Any]) -> str:
+        if worktree.get("text"):
+            return str(worktree["text"])
+        return (
+            f"工作树共 {worktree.get('tracked_count', 0)} 个受控文件："
+            f"未改动 {worktree.get('clean_count', 0)} 个、"
+            f"已改动 {worktree.get('tracked_dirty_count', 0)} 个、"
+            f"未跟踪 {worktree.get('untracked_count', 0)} 个"
+        )
 
     async def version_info(self) -> dict[str, Any]:
         return {
@@ -641,6 +852,7 @@ class ModuleUpdateService:
             for component in ("backend", FRONTEND_COMPONENT[self.frontend])
         }
         state = self._read_state()
+        worktree = await asyncio.to_thread(self._worktree_summary)
         return {
             "mode": "module",
             "frontend": self.frontend,
@@ -655,7 +867,11 @@ class ModuleUpdateService:
             "current_branch": f"{self.frontend} modules",
             "current_commit": "",
             "current_commit_short": "",
-            "worktree_dirty": self._development_dirty(),
+            "worktree_dirty": worktree.get("dirty", False),
+            "worktree": worktree,
+            "worktree_text": self._worktree_text(worktree),
+            "update_entries": list(BACKEND_UPDATE_ENTRIES),
+            "preserved_entries": list(BACKEND_PRESERVED_ENTRIES),
             "data_dir": str(self.data_dir),
             "data_dir_inside_project": self._dir_inside_project(),
             "restart_supported": self.restart_callback is not None,
@@ -717,6 +933,7 @@ class ModuleUpdateService:
             key: self._component_summary(value)
             for key, value in catalog["components"].items()
         }
+        worktree = await asyncio.to_thread(self._worktree_summary)
         return {
             "mode": "module",
             "frontend": self.frontend,
@@ -725,7 +942,10 @@ class ModuleUpdateService:
             "current_commit": "",
             "current_commit_short": "",
             "current_branch": f"{self.frontend} modules",
-            "worktree_dirty": self._development_dirty(),
+            "worktree_dirty": worktree.get("dirty", False),
+            "worktree": worktree,
+            "worktree_text": self._worktree_text(worktree),
+            "preserved_entries": list(BACKEND_PRESERVED_ENTRIES),
             "mirror": "",
             "version_label": self._version_label(),
             "interval_days": self.check_interval_days,
@@ -776,8 +996,30 @@ class ModuleUpdateService:
                     selected.append(
                         _Selection(component, release["release_tag"], release)
                     )
-        dirty = self._development_dirty()
+        worktree = await asyncio.to_thread(self._worktree_summary)
         warnings: list[str] = []
+        if worktree.get("available"):
+            warnings.append(
+                f"{self._worktree_text(worktree)}。"
+                "更新采用文件级叠加：只写入程序文件，data/、personas/、"
+                "config.yaml、plugins/ 与备份等用户数据不会改动，也不会删除任何文件。"
+            )
+        if selected and not worktree.get("available"):
+            warnings.append(
+                "当前安装没有可用的 Git 工作树，无法统计工作树改动；"
+                "更新会先备份再覆盖程序文件，用户数据仍不会改动。"
+            )
+        elif selected and worktree.get("error"):
+            warnings.append(
+                "无法读取 Git 工作树状态；更新不会因此被拒绝，"
+                "覆盖前会逐个备份被替换的程序文件。"
+            )
+        elif selected and worktree.get("dirty"):
+            warnings.append(
+                f"工作树有 {worktree.get('dirty_count', 0)} 个改动/未跟踪文件，"
+                "不会阻止更新；每个被发布版替换的程序文件都会先备份到数据目录的 "
+                "module_backups/，可从中恢复。"
+            )
         if any(item.public.get("prerelease") for item in selected):
             warnings.append(
                 "这是 GitHub Pre-release 版本，极不稳定，可能包含未完成的接口或数据迁移；"
@@ -793,11 +1035,6 @@ class ModuleUpdateService:
         if self.frontend == "gui":
             warnings.append(
                 "如果后端和前端都有更新，请先更新两者，再重新打开 GUI。"
-            )
-        if dirty:
-            warnings.append(
-                "当前是包含未提交改动的开发工作树，更新会拒绝执行；"
-                "请使用打包安装版或干净工作树。"
             )
         if selected:
             token = secrets.token_urlsafe(32)
@@ -832,10 +1069,8 @@ class ModuleUpdateService:
             "ok": True,
             "frontend": self.frontend,
             "checked_at": time.time(),
-            "can_apply": bool(selected) and not dirty,
-            "reason": "worktree_dirty" if dirty else (
-                "" if selected else "up_to_date"
-            ),
+            "can_apply": bool(selected),
+            "reason": "" if selected else "up_to_date",
             "target_tag": selected[0].tag if len(selected) == 1 else "",
             "target_name": target_name,
             "target_commit": "",
@@ -857,7 +1092,12 @@ class ModuleUpdateService:
                 for value in catalog["components"].values()
             ),
             "errors": catalog.get("errors") or {},
-            "worktree_dirty": dirty,
+            "worktree_dirty": worktree.get("dirty", False),
+            "worktree": worktree,
+            "worktree_text": self._worktree_text(worktree),
+            "local_changes_policy": "backup_then_overwrite",
+            "update_entries": list(BACKEND_UPDATE_ENTRIES),
+            "preserved_entries": list(BACKEND_PRESERVED_ENTRIES),
             "version_label": self._version_label(),
         }
         state = self._read_state()
@@ -913,10 +1153,6 @@ class ModuleUpdateService:
             )
         if float(plan.get("expires") or 0) < time.time():
             raise ModuleUpdateError("check_expired", "更新检查已过期，请重新检查")
-        if not self.allow_development_tree and self._development_dirty():
-            raise ModuleUpdateError(
-                "worktree_dirty", "开发工作树有未提交改动，拒绝覆盖模块目录"
-            )
         selected = list(plan.get("selected") or [])
         if not selected:
             raise ModuleUpdateError("no_check", "没有可应用的模块更新")
@@ -926,9 +1162,16 @@ class ModuleUpdateService:
                 "目标包含 Pre-release，必须显式确认其极不稳定后才能更新",
             )
         async with self._lock:
+            if self._plan is not plan:
+                raise ModuleUpdateError(
+                    "confirmation_token_invalid",
+                    "确认令牌已失效（可能已执行过更新），请重新检查更新",
+                )
             result = await asyncio.to_thread(self._apply_sync, selected)
-        self._plan = None
-        self._catalog_cache = None
+            # Single-use token: a second concurrent apply must not run again.
+            self._plan = None
+            self._catalog_cache = None
+        worktree = await asyncio.to_thread(self._worktree_summary)
         return {
             "mode": "module",
             "ok": True,
@@ -936,6 +1179,11 @@ class ModuleUpdateService:
             "updated": result["updated"],
             "backend_updated": result["backend_updated"],
             "frontend_updated": result["frontend_updated"],
+            "partial": result.get("partial", False),
+            "skipped_components": result.get("skipped_components") or [],
+            "local_changes": result.get("local_changes") or {},
+            "worktree": worktree,
+            "worktree_text": self._worktree_text(worktree),
             "restart_required": result["backend_updated"],
             "restart_scheduled": False,
             "requires_app_restart": bool(
@@ -945,18 +1193,35 @@ class ModuleUpdateService:
                 result["frontend_updated"] and self.frontend == "webui"
             ),
             "backup_dir": result["backup_dir"],
+            "files": result.get("files") or {},
+            "frontend_files": result.get("frontend_files") or {},
+            "preserved_entries": (
+                (result.get("files") or {}).get("preserved_entries") or []
+            ),
             "components": result["components"],
         }
 
-    def _apply_sync(self, selected: list[dict[str, Any]]) -> dict[str, Any]:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    def _apply_sync(
+        self,
+        selected: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        timestamp = (
+            datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            + "-"
+            + secrets.token_hex(3)
+        )
         backup_root = self.data_dir / "module_backups" / timestamp
-        backup_root.mkdir(parents=True, exist_ok=True)
-        temp_root = Path(tempfile.mkdtemp(prefix="karen-module-update-"))
+        try:
+            backup_root.mkdir(parents=True, exist_ok=True)
+            temp_root = Path(tempfile.mkdtemp(prefix="karen-module-update-"))
+        except OSError as exc:
+            raise ModuleUpdateError(
+                "module_apply_failed",
+                f"无法创建更新备份/临时目录：{type(exc).__name__}: {exc}",
+            ) from exc
         staged: dict[str, Path] = {}
-        backups: dict[str, Path] = {}
-        updated: list[dict[str, Any]] = []
-        replaced: list[str] = []
+        staged_meta: dict[str, dict[str, Any]] = {}
+        file_changes: list[tuple[Path, Path | None]] = []
         try:
             catalog = self._catalog_cache[1] if self._catalog_cache else {}
             release_map = {
@@ -1002,37 +1267,62 @@ class ModuleUpdateService:
                         version + "\n", encoding="utf-8"
                     )
                 staged[component] = module_dir
-                target = self.project_root / MODULE_DIRS[component]
-                if target.exists():
-                    backup = backup_root / MODULE_DIRS[component]
-                    shutil.copytree(target, backup, symlinks=True)
-                    backups[component] = backup
-                updated.append(
-                    {
-                        "component": component,
-                        "tag": tag,
-                        "version": version or tag.lstrip("vV"),
-                    }
-                )
+                staged_meta[component] = {
+                    "component": component,
+                    "tag": tag,
+                    "version": version or tag.lstrip("vV"),
+                }
             if not staged:
                 raise ModuleUpdateError("no_check", "没有可应用的模块更新")
+
+            component_stats: dict[str, dict[str, Any]] = {}
             for component, module_dir in staged.items():
-                target = self.project_root / MODULE_DIRS[component]
-                old = target.with_name(target.name + f".old-{timestamp}")
-                if target.exists():
-                    os.replace(target, old)
-                try:
-                    shutil.copytree(module_dir, target)
-                except Exception:
-                    if old.exists():
-                        os.replace(old, target)
-                    raise
-                if old.exists():
-                    shutil.rmtree(old, ignore_errors=True)
-                replaced.append(component)
+                if component == "backend":
+                    target_root = self.project_root
+                    backup_dir = backup_root / "files"
+                else:
+                    target_root = self.project_root / MODULE_DIRS[component]
+                    backup_dir = backup_root / component / "files"
+                stats, _changes = self._overlay_tree(
+                    module_dir,
+                    target_root,
+                    backup_dir,
+                    report_preserved_entries=(component == "backend"),
+                    change_log=file_changes,
+                )
+                component_stats[component] = stats
+
+            unsafe_total = sum(
+                stats["skipped_links"] + stats["skipped_non_files"]
+                for stats in component_stats.values()
+            )
+            if unsafe_total:
+                details = []
+                for component, stats in component_stats.items():
+                    samples = stats.get("skipped_target_samples") or []
+                    if samples:
+                        details.append(
+                            f"{MODULE_LABELS[component]}："
+                            + "、".join(samples[:5])
+                        )
+                raise ModuleUpdateError(
+                    "unsafe_update_target",
+                    f"有 {unsafe_total} 个更新目标被本地符号链接或目录占用，"
+                    "为保证不写入错误位置，本次更新已整体回滚。"
+                    + (" 涉及：" + "；".join(details) if details else ""),
+                )
+
+            applied = [
+                meta
+                for component, meta in staged_meta.items()
+                if component_stats[component]["updated_files"]
+                + component_stats[component]["new_files"]
+                > 0
+            ]
+
             manifest = self._manifest()
             manifest["frontend"] = self.frontend
-            for item in updated:
+            for item in staged_meta.values():
                 entry = manifest["components"].setdefault(item["component"], {})
                 entry["repo"] = MODULE_REPOS[item["component"]]
                 entry["dir"] = MODULE_DIRS[item["component"]]
@@ -1042,16 +1332,36 @@ class ModuleUpdateService:
             _write_manifest_atomic(self.project_root, manifest)
         except Exception as exc:  # noqa: BLE001
             logger.exception("模块更新失败，开始回滚")
-            for component in replaced:
-                target = self.project_root / MODULE_DIRS[component]
-                backup = backups.get(component)
+            rollback_failures: list[str] = []
+            for target, backup in reversed(file_changes):
                 try:
-                    if target.exists():
-                        shutil.rmtree(target)
                     if backup is not None and backup.exists():
-                        shutil.copytree(backup, target, symlinks=True)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(backup, target)
+                    elif target.exists():
+                        target.unlink()
                 except Exception:  # noqa: BLE001
-                    logger.exception("回滚 %s 失败", component)
+                    logger.exception("回滚文件 %s 失败", target)
+                    try:
+                        rollback_failures.append(
+                            str(target.relative_to(self.project_root))
+                        )
+                    except ValueError:
+                        rollback_failures.append(str(target))
+            if rollback_failures:
+                note = (
+                    f"；另有 {len(rollback_failures)} 个文件回滚失败，"
+                    f"请从 {backup_root} 手动恢复："
+                    + "、".join(rollback_failures[:5])
+                )
+                if isinstance(exc, ModuleUpdateError):
+                    raise ModuleUpdateError(
+                        exc.code, exc.message + note
+                    ) from exc
+                raise ModuleUpdateError(
+                    "module_apply_failed",
+                    f"模块更新失败：{type(exc).__name__}: {exc}{note}",
+                ) from exc
             if isinstance(exc, ModuleUpdateError):
                 raise
             raise ModuleUpdateError(
@@ -1059,26 +1369,70 @@ class ModuleUpdateService:
             ) from exc
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
+
+        backend_stats = component_stats.get("backend", {})
+        frontend_component = FRONTEND_COMPONENT[self.frontend]
+        frontend_stats = component_stats.get(frontend_component, {})
+        messages = [
+            self._applied_message(component, stats)
+            for component, stats in component_stats.items()
+        ]
+        messages.append("用户数据、人格、配置与插件均未改动")
+        if frontend_stats.get("updated_files") or frontend_stats.get("new_files"):
+            if self.frontend == "gui":
+                messages.append("GUI 前端文件已更新，需完全退出并重新打开应用")
+            else:
+                messages.append("WebUI 文件已更新，刷新浏览器页面后生效")
         return {
-            "message": "模块更新完成"
-            + ("；需要重启 GUI 或刷新 WebUI 页面" if self.frontend == "webui" else ""),
-            "updated": updated,
-            "backend_updated": any(item["component"] == "backend" for item in updated),
-            "frontend_updated": any(
-                item["component"] == FRONTEND_COMPONENT[self.frontend]
-                for item in updated
+            "message": "；".join(messages) + "。",
+            "updated": applied,
+            "backend_updated": any(
+                item["component"] == "backend" for item in applied
             ),
+            "frontend_updated": any(
+                item["component"] == frontend_component for item in applied
+            ),
+            "partial": False,
+            "skipped_components": [],
+            "local_changes": {
+                "policy": "backup_then_overwrite",
+                "backup_dir": str(backup_root),
+            },
             "backup_dir": str(backup_root),
+            "files": backend_stats,
+            "frontend_files": frontend_stats,
             "components": {
                 component: self._installed(component)
-                for component in ("backend", FRONTEND_COMPONENT[self.frontend])
+                for component in ("backend", frontend_component)
             },
         }
+
+    @staticmethod
+    def _applied_message(component: str, stats: dict[str, Any]) -> str:
+        label = MODULE_LABELS[component]
+        updated = stats.get("updated_files", 0)
+        new = stats.get("new_files", 0)
+        unchanged = stats.get("unchanged_files", 0)
+        if not updated and not new:
+            text = f"{label}文件已与发布版一致（{unchanged} 个未改动）"
+        else:
+            text = (
+                f"{label}更新完成：覆盖 {updated} 个（已备份）、"
+                f"新增 {new} 个、未改动 {unchanged} 个"
+            )
+        return text
 
     @staticmethod
     def _extract_module(
         archive: Path, component: str, destination: Path
     ) -> str:
+        """把模块发布包解到 staging 目录。
+
+        后端组件按 ``BACKEND_UPDATE_ENTRIES`` 白名单提取完整后端程序；
+        GUI/WebUI 仍只提取各自的模块目录。白名单直接杜绝发布包覆盖用户
+        数据、人格、配置和插件目录。
+        """
+
         version = ""
         expected = MODULE_DIRS[component]
         with tarfile.open(archive, "r:*") as tar:
@@ -1087,17 +1441,30 @@ class ModuleUpdateService:
                     continue
                 name = member.name.replace("\\", "/")
                 parts = [part for part in name.split("/") if part]
-                if len(parts) == 2 and parts[1] == "VERSION":
+                if len(parts) < 2:
+                    continue
+                relative_parts = parts[1:]
+                if relative_parts == ["VERSION"]:
                     try:
                         version = tar.extractfile(member).read().decode(
                             "utf-8", errors="replace"
                         ).strip()
                     except (AttributeError, OSError):
                         pass
-                    continue
-                if len(parts) < 3 or parts[1] != expected:
-                    continue
-                relative = Path(*parts[2:])
+                    if component != "backend":
+                        continue
+                if component == "backend":
+                    if relative_parts[0] in BACKEND_PRESERVED_ENTRIES:
+                        continue
+                    if relative_parts[0] not in BACKEND_UPDATE_ENTRIES:
+                        continue
+                    relative = Path(*relative_parts)
+                else:
+                    if len(relative_parts) < 2:
+                        continue
+                    if relative_parts[0] != expected:
+                        continue
+                    relative = Path(*relative_parts[1:])
                 if relative.is_absolute() or ".." in relative.parts:
                     continue
                 target = destination / relative
@@ -1112,13 +1479,115 @@ class ModuleUpdateService:
                 except OSError:
                     pass
             if not version:
-                # Some archives put VERSION inside the module directory.
-                version_file = destination / "VERSION"
-                if version_file.is_file():
-                    version = version_file.read_text(
-                        encoding="utf-8", errors="replace"
-                    ).strip()
+                # Some archives put VERSION next to the module directory.
+                candidates = [destination / "VERSION"]
+                if component != "backend":
+                    candidates.append(destination / expected / "VERSION")
+                for version_file in candidates:
+                    if version_file.is_file():
+                        version = version_file.read_text(
+                            encoding="utf-8", errors="replace"
+                        ).strip()
+                        break
         return version
+
+    def _overlay_tree(
+        self,
+        staged_root: Path,
+        target_root: Path,
+        backup_root: Path,
+        *,
+        report_preserved_entries: bool = False,
+        change_log: list[tuple[Path, Path | None]] | None = None,
+    ) -> tuple[dict[str, Any], list[tuple[Path, Path | None]]]:
+        """把发布包叠加到目标目录：只写程序文件、不删除任何文件。
+
+        覆盖前把每个将被替换的旧文件备份到 ``backup_root``，用户可从备份
+        目录恢复；白名单之外的用户数据不会被写入。
+        """
+
+        stats: dict[str, Any] = {
+            "total_files": 0,
+            "updated_files": 0,
+            "new_files": 0,
+            "unchanged_files": 0,
+            "skipped_links": 0,
+            "skipped_non_files": 0,
+            "skipped_target_samples": [],
+        }
+        changes: list[tuple[Path, Path | None]] = (
+            change_log if change_log is not None else []
+        )
+        target_root.mkdir(parents=True, exist_ok=True)
+        for source in sorted(staged_root.rglob("*")):
+            if not source.is_file() or source.is_symlink():
+                continue
+            relative = source.relative_to(staged_root)
+            stats["total_files"] += 1
+            target = target_root / relative
+            # Never follow a local symlink, and never write through any
+            # symlinked path component (even one pointing inside the project:
+            # a release file must not be redirected into data/ or elsewhere).
+            cursor = target_root
+            unsafe_link = _is_link_like(cursor)
+            if not unsafe_link:
+                for part in relative.parts[:-1]:
+                    cursor = cursor / part
+                    if _is_link_like(cursor):
+                        unsafe_link = True
+                        break
+            if unsafe_link or _is_link_like(target):
+                stats["skipped_links"] += 1
+                if len(stats["skipped_target_samples"]) < 20:
+                    stats["skipped_target_samples"].append(relative.as_posix())
+                continue
+            if target.exists() and not target.is_file():
+                # A directory where the release has a file is local content we
+                # must not replace.
+                stats["skipped_non_files"] += 1
+                if len(stats["skipped_target_samples"]) < 20:
+                    stats["skipped_target_samples"].append(relative.as_posix())
+                continue
+            if target.exists():
+                try:
+                    identical = target.read_bytes() == source.read_bytes()
+                except OSError:
+                    identical = False
+                if identical:
+                    stats["unchanged_files"] += 1
+                    continue
+                backup = backup_root / relative
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, backup)
+                changes.append((target, backup))
+                stats["updated_files"] += 1
+            else:
+                changes.append((target, None))
+                stats["new_files"] += 1
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temp = target.with_name(
+                f".{target.name}.karen-update-{os.getpid()}.tmp"
+            )
+            try:
+                shutil.copy2(source, temp)
+                os.replace(temp, target)
+            finally:
+                try:
+                    if temp.exists():
+                        temp.unlink()
+                except OSError:
+                    pass
+            try:
+                target.chmod(source.stat().st_mode & 0o777)
+            except OSError:
+                pass
+        if report_preserved_entries:
+            stats["preserved_entries"] = sorted(
+                entry.name
+                for entry in self.project_root.iterdir()
+                if entry.name not in BACKEND_UPDATE_ENTRIES
+            )
+        return stats, changes
 
     async def auto_check_if_due(self, *, now: float | None = None) -> dict[str, Any]:
         current_time = time.time() if now is None else float(now)
