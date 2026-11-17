@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import sqlite3
-import threading
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Iterable, Mapping
@@ -164,9 +163,6 @@ class KarenHistoryStore:
         self.max_pages = int(max_pages)
         self._page_cache: OrderedDict[tuple[int, int, int], list[dict]] = OrderedDict()
         self._page_cache_bytes = 0
-        # 首次建连时才做 schema 检查/初始化，之后普通查询只配置连接级 PRAGMA。
-        self._schema_ready = False
-        self._schema_lock = threading.Lock()
 
     @property
     def db(self) -> KarenDB:
@@ -630,20 +626,10 @@ class KarenHistoryStore:
             else:
                 conn.commit()
 
-    def _connect(self):
-        # schema 检查/初始化只在首次建连时做一次；之后每次连接只执行
-        # PRAGMA 配置，避免每个分页查询都重复 DDL 与版本写入。
-        if not self._schema_ready:
-            with self._schema_lock:
-                if not self._schema_ready:
-                    bootstrap = KarenDB(
-                        self._db.path,
-                        busy_timeout_ms=self._db.busy_timeout_ms,
-                    )
-                    bootstrap.load()
-                    bootstrap.close()
-                    self._schema_ready = True
+    def _connect(self) -> sqlite3.Connection:
+        # ensure_ready() 只做版本自检；schema 未初始化时才执行 DDL。
         db = KarenDB(self._db.path, busy_timeout_ms=self._db.busy_timeout_ms)
+        db.ensure_ready()
         return db.connect()
 
     def _insert_records(
@@ -786,7 +772,7 @@ class KarenArchiveStore:
 
     def _connect(self) -> sqlite3.Connection:
         db = KarenDB(self._db.path, busy_timeout_ms=self._db.busy_timeout_ms)
-        db.load()
+        db.ensure_ready()
         return db.connect()
 
     def _append_many_sync(self, records: list[dict[str, Any]]) -> None:
@@ -1209,9 +1195,9 @@ class KarenImportantStore:
             else:
                 conn.commit()
 
-    def _connect(self):
+    def _connect(self) -> sqlite3.Connection:
         db = KarenDB(self._db.path, busy_timeout_ms=self._db.busy_timeout_ms)
-        db.load()
+        db.ensure_ready()
         return db.connect()
 
     def _insert_data(self, conn: sqlite3.Connection, data: Any) -> None:
@@ -1636,7 +1622,7 @@ class KarenPersonaDB:
 
     def _connect(self) -> sqlite3.Connection:
         db = KarenDB(self._db.path, busy_timeout_ms=self._db.busy_timeout_ms)
-        db.load()
+        db.ensure_ready()
         return db.connect()
 
     def _load_sync(self) -> None:
@@ -2445,9 +2431,9 @@ class KarenRollingSummaryStore:
             else:
                 conn.commit()
 
-    def _connect(self):
+    def _connect(self) -> sqlite3.Connection:
         db = KarenDB(self._db.path, busy_timeout_ms=self._db.busy_timeout_ms)
-        db.load()
+        db.ensure_ready()
         return db.connect()
 
     def _load_summary_json(self, row: sqlite3.Row) -> dict[str, Any] | None:
@@ -2700,9 +2686,9 @@ class KarenUsageStatsStore:
             else:
                 conn.commit()
 
-    def _connect(self):
+    def _connect(self) -> sqlite3.Connection:
         db = KarenDB(self._db.path, busy_timeout_ms=self._db.busy_timeout_ms)
-        db.load()
+        db.ensure_ready()
         return db.connect()
 
 
@@ -2710,12 +2696,9 @@ class KarenEventStore:
     """使用 karen.db 的 event_log 表实现 EventJournal 可用的事件仓储。"""
 
     _PROJECTION_STATE_NAME = "last_projected_event_id"
-    _schema_lock = threading.Lock()
-    _schema_ready_paths: set[Path] = set()
 
     def __init__(self, db: KarenDB | str | Path, persona_id: str) -> None:
         self._db = db if isinstance(db, KarenDB) else KarenDB(db)
-        self._schema_path = self._db.path.expanduser().resolve()
         self.persona_id = str(persona_id).strip()
         if not self.persona_id:
             raise ValueError("persona_id must not be empty")
@@ -3208,25 +3191,19 @@ class KarenEventStore:
         )
 
     def _ensure_schema_sync(self) -> None:
-        if self._schema_path in self._schema_ready_paths and self._schema_path.exists():
-            return
-        with self._schema_lock:
-            if self._schema_path in self._schema_ready_paths and self._schema_path.exists():
-                return
-            db = KarenDB(self._db.path, busy_timeout_ms=self._db.busy_timeout_ms)
-            try:
-                db.load()
-            finally:
-                db.close()
-            self._schema_ready_paths.add(self._schema_path)
+        db = KarenDB(self._db.path, busy_timeout_ms=self._db.busy_timeout_ms)
+        try:
+            db.ensure_ready()
+        finally:
+            db.close()
 
     def _connect(self) -> sqlite3.Connection:
-        self._db.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self._db.path, timeout=self._db.busy_timeout_ms / 1000)
-        conn.row_factory = sqlite3.Row
-        conn.execute(f"PRAGMA busy_timeout={int(self._db.busy_timeout_ms)}")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        # 与其它 Store 共用同一套连接配置：WAL + synchronous=NORMAL +
+        # foreign_keys=ON，避免事件写入使用默认的 synchronous=FULL。
+        # schema 由 _ensure_loaded() -> _ensure_schema_sync() 在首次使用前
+        # 保证；所有公开方法都先等待该入口，热路径不再重复版本查询。
+        db = KarenDB(self._db.path, busy_timeout_ms=self._db.busy_timeout_ms)
+        return db.connect()
 
 
 _LEGACY_RAW_IMPORTANT_MEMORY_ID = "__karen_important_raw__"

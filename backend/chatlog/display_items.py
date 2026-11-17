@@ -336,6 +336,13 @@ def _parse_timestamp_value(value: Any) -> float | None:
     text = value.strip()
     if text.isdigit():
         return float(text)
+    # 本项目最常见的 ISO 8601 格式直接走 fromisoformat，跳过两次必然
+    # 失败的 strptime 尝试；带 T 的字符串与空格格式不会互相匹配。
+    if "T" in text:
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"):
         try:
             return datetime.strptime(text, fmt).timestamp()

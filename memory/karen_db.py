@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +14,14 @@ from urllib.parse import quote
 KAREN_DB_SCHEMA_VERSION = 1
 KAREN_DB_INITIAL_MIGRATION_ID = "v1_initial_schema"
 DEFAULT_BUSY_TIMEOUT_MS = 30_000
+
+# schema 初始化只在版本检查失败时发生；这把进程内锁避免多个 Store 在
+# 首次并发访问时重复跑同一批 DDL。跨进程仍由 SQLite 自己的写锁串行化。
+_SCHEMA_INIT_LOCK = threading.Lock()
+# 并发连接同时执行 PRAGMA journal_mode=WAL 会偶发 database is locked；
+# 用一把进程锁串行化这一次 PRAGMA。每次连接仍会设置，避免原地恢复成
+# DELETE 模式的数据库被身份缓存误判。
+_WAL_SETUP_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,11 +50,47 @@ class KarenDB:
         self._conn: sqlite3.Connection | None = None
 
     def load(self) -> KarenDB:
-        """打开数据库并幂等初始化 v1 schema。"""
+        """打开数据库并幂等初始化 v1 schema。
+
+        该入口保留“总是执行 schema 初始化”的旧语义，主要供导入、测试和
+        显式管理入口使用。普通读写热路径应使用 :meth:`ensure_ready`。
+        """
 
         conn = self.connect()
         self.ensure_schema(conn)
         return self
+
+    def ensure_ready(self) -> KarenDB:
+        """打开数据库，仅在版本落后或对象缺失时初始化 schema。
+
+        每次调用只做只读的版本与对象完整性检查（``PRAGMA user_version``、
+        迁移表最大值、``sqlite_master`` 中的表和索引计数），避免每个
+        Store 的每次读写都重跑整套 DDL。数据库被恢复成空文件或部分
+        表/索引缺失时，检查会失败并自动补建 schema。
+        """
+
+        conn = self.connect()
+        if self._is_schema_current(conn):
+            return self
+        with _SCHEMA_INIT_LOCK:
+            if self._is_schema_current(conn):
+                return self
+            try:
+                self.ensure_schema(conn)
+            except Exception:
+                # 初始化失败的连接不应留给调用方继续使用。
+                self.close()
+                raise
+        return self
+
+    def _is_schema_current(self, conn: sqlite3.Connection) -> bool:
+        version = self.schema_version(conn)
+        if (
+            version.user_version != KAREN_DB_SCHEMA_VERSION
+            or version.migration_version != KAREN_DB_SCHEMA_VERSION
+        ):
+            return False
+        return _schema_objects_present(conn)
 
     def close(self) -> None:
         """关闭当前持有的连接。"""
@@ -143,7 +189,8 @@ def backup_existing_database(
 
 def _configure_connection(conn: sqlite3.Connection, busy_timeout_ms: int) -> None:
     conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
-    conn.execute("PRAGMA journal_mode=WAL")
+    with _WAL_SETUP_LOCK:
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
 
@@ -178,6 +225,28 @@ def _raise_if_future_schema(version: KarenDBSchemaVersion) -> None:
             f"karen.db schema version is newer than supported: {details}; "
             f"supported_version={KAREN_DB_SCHEMA_VERSION}"
         )
+
+
+def _schema_objects_present(conn: sqlite3.Connection) -> bool:
+    """确认 v1 契约里的表和索引都还在，供 ``ensure_ready`` 自愈缺表库。"""
+
+    placeholders = ",".join("?" for _ in _V1_SCHEMA_NAMES)
+    row = conn.execute(
+        f"""
+        SELECT
+            COALESCE(SUM(CASE WHEN type = 'table' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN type = 'index' THEN 1 ELSE 0 END), 0)
+        FROM sqlite_master
+        WHERE name IN ({placeholders})
+        """,
+        _V1_SCHEMA_NAMES,
+    ).fetchone()
+    if row is None:
+        return False
+    return (
+        int(row[0]) == len(_V1_TABLE_NAMES)
+        and int(row[1]) == len(_V1_INDEX_NAMES)
+    )
 
 
 def _reserve_unique_backup_path(
@@ -527,6 +596,23 @@ _V1_SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_persona_sleep_started ON persona_sleep_records(persona_id, started_at)",
     "CREATE INDEX IF NOT EXISTS idx_persona_eat_record_id ON persona_eat_records(persona_id, record_id)",
 )
+
+_V1_TABLE_NAMES = tuple(
+    match.group(1)
+    for statement in _V1_SCHEMA_STATEMENTS
+    if (match := re.search(r"CREATE TABLE IF NOT EXISTS\s+(\w+)", statement))
+)
+_V1_INDEX_NAMES = tuple(
+    match.group(1)
+    for statement in _V1_SCHEMA_STATEMENTS
+    if (
+        match := re.search(
+            r"CREATE (?:UNIQUE )?INDEX IF NOT EXISTS\s+(\w+)",
+            statement,
+        )
+    )
+)
+_V1_SCHEMA_NAMES = (*_V1_TABLE_NAMES, *_V1_INDEX_NAMES)
 
 
 __all__ = [
