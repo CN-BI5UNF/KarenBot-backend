@@ -32,6 +32,17 @@ class ArchiveStore:
     async def records(self) -> list[dict]:
         return await self._store.records()
 
+    async def records_since(
+        self,
+        rowid: int,
+    ) -> tuple[list[dict], int, int, int] | None:
+        """转发增量归档读取；底层不支持时返回 None。"""
+
+        method = getattr(self._store, "records_since", None)
+        if not callable(method):
+            return None
+        return await method(rowid)
+
     async def search(
         self,
         *,

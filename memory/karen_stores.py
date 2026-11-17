@@ -702,6 +702,22 @@ class KarenArchiveStore:
         async with self._lock:
             return await asyncio.to_thread(self._records_sync)
 
+    async def records_since(
+        self,
+        rowid: int,
+    ) -> tuple[list[dict], int, int, int]:
+        """返回 rowid 之后的新归档记录及一致性所需计数。
+
+        返回值：``(真实聊天记录, 当前原始行数, 当前最大 rowid, 本批原始行数)``。
+        调用方用原始行数差值判断期间是否发生物理删除。
+        """
+
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._records_since_sync,
+                max(0, int(rowid)),
+            )
+
     async def search(
         self,
         *,
@@ -935,6 +951,32 @@ class KarenArchiveStore:
                 (self.persona_id,),
             ).fetchall()
         return [_row_to_record(row) for row in rows if _row_is_real_chat(row)]
+
+    def _records_since_sync(
+        self,
+        rowid: int,
+    ) -> tuple[list[dict], int, int, int]:
+        with closing(self._connect()) as conn:
+            stats_row = conn.execute(
+                """
+                SELECT COUNT(*) AS raw_count, COALESCE(MAX(rowid), 0) AS max_rowid
+                FROM archive_messages
+                WHERE persona_id = ?
+                """,
+                (self.persona_id,),
+            ).fetchone()
+            rows = conn.execute(
+                """
+                SELECT * FROM archive_messages
+                WHERE persona_id = ? AND rowid > ?
+                ORDER BY rowid ASC
+                """,
+                (self.persona_id, rowid),
+            ).fetchall()
+        raw_count = int(stats_row["raw_count"] or 0) if stats_row else 0
+        max_rowid = int(stats_row["max_rowid"] or 0) if stats_row else 0
+        records = [_row_to_record(row) for row in rows if _row_is_real_chat(row)]
+        return records, raw_count, max_rowid, len(rows)
 
     def _legacy_search_sync(
         self,
@@ -2883,6 +2925,16 @@ class KarenEventStore:
             order,
         )
 
+    async def event_id_bounds(self, limit: int = 2000) -> tuple[int, int | None]:
+        """返回 (当前 persona 最大 event_id, 最新 limit 条中最小的 event_id)。
+
+        事件数不足 limit 时第二个值为 ``None``，表示无需按窗口裁剪。
+        """
+
+        limit = max(1, int(limit))
+        await self._ensure_loaded()
+        return await asyncio.to_thread(self._event_id_bounds_sync, limit)
+
     async def events_for_conversation(
         self,
         conversation_id: str,
@@ -3135,6 +3187,28 @@ class KarenEventStore:
                 params,
             ).fetchall()
         return [_row_to_event(row) for row in rows]
+
+    def _event_id_bounds_sync(self, limit: int) -> tuple[int, int | None]:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(event_id), 0) FROM event_log WHERE persona_id = ?",
+                (self.persona_id,),
+            ).fetchone()
+            max_event_id = int(row[0]) if row else 0
+            if max_event_id <= 0:
+                return 0, None
+            window_row = conn.execute(
+                """
+                SELECT event_id FROM event_log
+                WHERE persona_id = ?
+                ORDER BY event_id DESC
+                LIMIT 1 OFFSET ?
+                """,
+                (self.persona_id, limit - 1),
+            ).fetchone()
+        return max_event_id, (
+            int(window_row[0]) if window_row is not None else None
+        )
 
     def _events_for_conversation_sync(
         self,

@@ -10,6 +10,7 @@ import re
 import time
 import weakref
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -34,6 +35,14 @@ logger = logging.getLogger("backend.chatlog.records")
 
 ARCHIVE_FETCH_PAGE_SIZE = 500
 EVENT_STORE_QQ_FETCH_LIMIT = 500
+# EventStore.iter_events 内部会把 limit 压到 1000；对话页窗口必须按
+# 实际生效值计算，否则增量缓存会多保留已经滑出窗口的事件。
+EVENT_STORE_MAX_FETCH_LIMIT = 1000
+_EVENT_PAGE_EVENT_LIMIT = min(
+    max(EVENT_STORE_QQ_FETCH_LIMIT * 4, 2000),
+    EVENT_STORE_MAX_FETCH_LIMIT,
+)
+_EVENT_CATCHUP_BATCH = 1000
 
 # 对话页合并结果缓存：低功耗设备上一次全量合并需要数秒到十几秒，而页面会
 # 连续请求 conversations / display / timeline。缓存按 runtime 对象和历史长度
@@ -44,6 +53,31 @@ _chat_page_cache: dict[
     tuple[weakref.ReferenceType[Any], int, float, list[dict], int],
 ] = {}
 _CHAT_PAGE_LOCKS: weakref.WeakKeyDictionary[Any, asyncio.Lock] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+@dataclass(slots=True)
+class _ArchiveReadCache:
+    """按 rowid 增量维护的归档读取缓存。"""
+
+    raw_count: int = -1
+    last_rowid: int = -1
+    records: list[dict] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _EventReadCache:
+    """按 event_id 增量维护的对话页事件读取缓存（已转换为显示记录）。"""
+
+    max_scanned_event_id: int = 0
+    records: list[dict] = field(default_factory=list)
+
+
+_ARCHIVE_READ_CACHES: weakref.WeakKeyDictionary[Any, _ArchiveReadCache] = (
+    weakref.WeakKeyDictionary()
+)
+_EVENT_READ_CACHES: weakref.WeakKeyDictionary[Any, _EventReadCache] = (
     weakref.WeakKeyDictionary()
 )
 QQ_VISIBLE_EVENT_TYPES = ("qq_message_received", "qq_message_sent")
@@ -169,6 +203,8 @@ def _runtime_record_severity(rec: dict[str, Any]) -> DisplaySeverity:
 def clear_chat_page_cache() -> None:
     """清空对话页缓存（测试或手动刷新时使用）。"""
     _chat_page_cache.clear()
+    _ARCHIVE_READ_CACHES.clear()
+    _EVENT_READ_CACHES.clear()
 
 
 def _estimate_records_bytes(records: list[dict]) -> int:
@@ -281,7 +317,7 @@ async def _load_chat_page_records_locked(runtime: Any) -> list[dict]:
         archive_elapsed_ms = (time.perf_counter() - step_started_at) * 1000
     else:
         try:
-            archive_records = list(await _load_archive_records_paged(archive) or [])
+            archive_records = list(await _load_archive_records_cached(archive) or [])
         except Exception as e:
             logger.warning(f"加载 archive 失败，仅显示实时聊天和运行时事件: {e}")
             archive_records = []
@@ -332,6 +368,14 @@ async def _load_event_store_records(runtime: Any) -> list[dict[str, Any]]:
     if event_store is None:
         return []
     try:
+        cached_records = await _load_event_records_cached(event_store)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"增量加载 EventStore 对话页事件失败，回退全量: {e}")
+        cached_records = None
+    if cached_records is not None:
+        return cached_records
+
+    try:
         events = await _recent_chat_page_events(event_store)
     except Exception as e:
         logger.warning(f"加载 EventStore 对话页事件失败，回退到实时/归档/历史记录: {e}")
@@ -345,6 +389,86 @@ async def _load_event_store_records(runtime: Any) -> list[dict[str, Any]]:
     return records
 
 
+def _converted_event_records(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        record
+        for event in _sort_unique_chat_page_events(events)
+        if (record := _event_store_event_to_record(event)) is not None
+    ]
+
+
+async def _load_event_records_cached(event_store: Any) -> list[dict[str, Any]] | None:
+    """按 event_id 增量维护对话页事件；不支持增量接口时返回 None。
+
+    窗口语义与旧实现一致：只展示“最近 N 条原始事件”中的可见事件。
+    每轮用 event_id_bounds 取窗口下界并裁掉滑出窗口的旧记录。
+    """
+
+    bounds = getattr(event_store, "event_id_bounds", None)
+    iter_events = getattr(event_store, "iter_events", None)
+    if not callable(bounds) or not callable(iter_events):
+        return None
+
+    bounds_result = await bounds(_EVENT_PAGE_EVENT_LIMIT)
+    if bounds_result is None:
+        return None
+    max_event_id, window_start = bounds_result
+    cache = _EVENT_READ_CACHES.get(event_store)
+
+    if cache is None or max_event_id < cache.max_scanned_event_id:
+        page = await iter_events(limit=_EVENT_PAGE_EVENT_LIMIT, order="desc")
+        events = (
+            [item for item in page if isinstance(item, dict)]
+            if isinstance(page, list)
+            else []
+        )
+        records = _converted_event_records(events)
+        max_scanned = (
+            max((_event_id(event) or 0) for event in events) if events else 0
+        )
+        cache = _EventReadCache(
+            max_scanned_event_id=max_scanned,
+            records=records,
+        )
+        _EVENT_READ_CACHES[event_store] = cache
+    elif max_event_id > cache.max_scanned_event_id:
+        new_events: list[dict[str, Any]] = []
+        cursor = cache.max_scanned_event_id
+        while True:
+            batch = await iter_events(
+                limit=_EVENT_CATCHUP_BATCH,
+                after_event_id=cursor,
+                order="asc",
+            )
+            if not isinstance(batch, list) or not batch:
+                break
+            new_events.extend(item for item in batch if isinstance(item, dict))
+            last_id = _event_id(batch[-1])
+            if last_id is None or last_id <= cursor:
+                break
+            cursor = last_id
+            if len(batch) < _EVENT_CATCHUP_BATCH:
+                break
+        if new_events:
+            converted = _converted_event_records(new_events)
+            if converted:
+                cache.records.extend(converted)
+            cache.max_scanned_event_id = max(
+                cursor,
+                max((_event_id(event) or 0) for event in new_events),
+            )
+        else:
+            cache.max_scanned_event_id = max_event_id
+
+    if window_start is not None:
+        cache.records = [
+            record
+            for record in cache.records
+            if (_event_id(record) or 0) >= window_start
+        ]
+    return list(cache.records)
+
+
 async def _recent_chat_page_events(event_store: Any) -> list[dict[str, Any]]:
     """读取对话页需要的最近事件。
 
@@ -356,7 +480,7 @@ async def _recent_chat_page_events(event_store: Any) -> list[dict[str, Any]]:
     if callable(iter_events):
         try:
             page = await iter_events(
-                limit=max(EVENT_STORE_QQ_FETCH_LIMIT * 4, 2000),
+                limit=_EVENT_PAGE_EVENT_LIMIT,
                 order="desc",
             )
         except Exception as e:
@@ -1490,6 +1614,57 @@ def _real_record_identity(record: dict[str, Any]) -> tuple[str, str, str] | None
     if not direction:
         direction = "outbound" if _record_role(record) == "assistant" else "inbound"
     return conversation_id, direction, msg_id
+
+
+async def _load_archive_records_cached(archive: Any) -> list[dict]:
+    """按 rowid 增量读取归档；删除或计数不一致时自动全量重载。
+
+    归档是追加为主的存储，但 scoped deletion 会物理删除行，因此每批
+    原始行数必须与缓存差值一致；任何删除都会让差值不成立并触发重载。
+    """
+
+    records_since = getattr(archive, "records_since", None)
+    if not callable(records_since):
+        return list(await _load_archive_records_paged(archive) or [])
+
+    cache = _ARCHIVE_READ_CACHES.get(archive)
+    try:
+        if cache is None:
+            result = await records_since(0)
+            if result is None:
+                return list(await _load_archive_records_paged(archive) or [])
+            records, raw_count, max_rowid, _new_raw = result
+            _ARCHIVE_READ_CACHES[archive] = _ArchiveReadCache(
+                raw_count=raw_count,
+                last_rowid=max_rowid,
+                records=list(records),
+            )
+            return list(records)
+
+        result = await records_since(cache.last_rowid)
+        if result is None:
+            return list(await _load_archive_records_paged(archive) or [])
+        records, raw_count, max_rowid, new_raw_count = result
+        consistent = (
+            raw_count >= cache.raw_count
+            and new_raw_count == raw_count - cache.raw_count
+            and max_rowid >= cache.last_rowid
+        )
+        if not consistent:
+            full = await records_since(0)
+            if full is None:
+                return list(await _load_archive_records_paged(archive) or [])
+            records, raw_count, max_rowid, _new_raw = full
+            cache.records = list(records)
+        elif records:
+            cache.records.extend(records)
+        cache.raw_count = raw_count
+        cache.last_rowid = max_rowid
+        return list(cache.records)
+    except Exception as exc:  # noqa: BLE001
+        _ARCHIVE_READ_CACHES.pop(archive, None)
+        logger.warning(f"增量读取 archive 失败，回退全量: {exc}")
+        return list(await _load_archive_records_paged(archive) or [])
 
 
 async def _load_archive_records_paged(archive: Any) -> list[dict]:

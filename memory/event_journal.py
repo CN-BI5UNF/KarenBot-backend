@@ -159,6 +159,17 @@ class EventJournal:
     async def get_events(self, event_ids: list[int]) -> list[dict[str, Any] | None]:
         return await self._store.get_events(event_ids)
 
+    async def event_id_bounds(
+        self,
+        limit: int = 2000,
+    ) -> tuple[int, int | None] | None:
+        """转发底层 event_id 窗口信息；不支持时返回 None。"""
+
+        method = getattr(self._store, "event_id_bounds", None)
+        if not callable(method):
+            return None
+        return await method(limit)
+
     async def iter_events(
         self,
         *,
