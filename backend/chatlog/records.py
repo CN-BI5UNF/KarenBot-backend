@@ -40,7 +40,8 @@ EVENT_STORE_QQ_FETCH_LIMIT = 500
 # 失效，TTL 只作为兜底；新消息写入 history 后长度变化，下一次请求会重新计算。
 _CHAT_PAGE_CACHE_TTL_SECONDS = 10.0
 _chat_page_cache: dict[
-    tuple[int, int, int], tuple[int, float, list[dict], int]
+    tuple[int, int, int],
+    tuple[weakref.ReferenceType[Any], int, float, list[dict], int],
 ] = {}
 _CHAT_PAGE_LOCKS: weakref.WeakKeyDictionary[Any, asyncio.Lock] = (
     weakref.WeakKeyDictionary()
@@ -182,7 +183,9 @@ def chat_page_cache_info() -> dict[str, int]:
     """对话页合并缓存的可回收规模；只统计条目与近似字节，不返回正文。"""
     approx_bytes = 0
     record_count = 0
-    for _history_length, _stamp, records, records_bytes in _chat_page_cache.values():
+    for _runtime_ref, _history_length, _stamp, records, records_bytes in (
+        _chat_page_cache.values()
+    ):
         record_count += len(records)
         approx_bytes += records_bytes
     return {
@@ -246,13 +249,18 @@ async def _load_chat_page_records_locked(runtime: Any) -> list[dict]:
     )
     now = time.monotonic()
     cached = _chat_page_cache.get(cache_key)
+    if cached is not None and cached[0]() is not runtime:
+        # RuntimeHost.restart() 会在同进程重建 Runtime；id 可能被复用，
+        # 必须用 weakref 校验身份，避免命中上一代 Runtime 的缓存。
+        _chat_page_cache.pop(cache_key, None)
+        cached = None
     if (
         cacheable
         and cached is not None
-        and cached[0] == history_length
-        and now - cached[1] <= _CHAT_PAGE_CACHE_TTL_SECONDS
+        and cached[1] == history_length
+        and now - cached[2] <= _CHAT_PAGE_CACHE_TTL_SECONDS
     ):
-        return list(cached[2])
+        return list(cached[3])
 
     step_started_at = now
     history_records = list(await history.records() or []) if history is not None else []
@@ -307,6 +315,7 @@ async def _load_chat_page_records_locked(runtime: Any) -> list[dict]:
         )
     if cacheable:
         _chat_page_cache[cache_key] = (
+            weakref.ref(runtime),
             history_length,
             time.monotonic(),
             records,
@@ -1420,10 +1429,10 @@ def _send_runtime_duplicate_ids(record: dict[str, Any]) -> set[str]:
     content = str(record.get("content") or "")
     # 绝大多数记录与发送无关。先做一次廉价判断，再进入 JSON/正则解析；
     # 生产数据上这一步让合并耗时下降约 55%，返回值逐条一致。
-    # 含反斜杠的内容可能带 JSON 转义键（如 "send_id"），必须交给
-    # 完整解析，不能按字面提前返回。
+    # 只有 JSON 的 \uXXXX 转义能构造出字面不匹配的 "send_id" 键；普通的
+    # \" 转义很常见，不应因此退回完整解析。
     if (
-        "\\" not in content
+        "\\u" not in content
         and not any(marker in content for marker in _SEND_CONTENT_MARKERS)
         and not any(
             record.get(key) is not None for key in _SEND_DUPLICATE_ID_KEYS

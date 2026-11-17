@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+import weakref
 from datetime import datetime
 
 import pytest
@@ -17,6 +19,10 @@ from backend.chatlog.records import (
     chat_page_cache_info,
     clear_chat_page_cache,
 )
+
+
+class _WeakOwner:
+    """可被 weakref 引用的占位对象。"""
 
 
 def _reference_parse_timestamp(value):
@@ -168,7 +174,9 @@ def test_merge_drops_archive_duplicate_of_event_record() -> None:
 
 def test_chat_page_cache_info_uses_precomputed_bytes() -> None:
     clear_chat_page_cache()
+    owner = _WeakOwner()
     chat_records._chat_page_cache[(1, 2, 3)] = (
+        weakref.ref(owner),
         4,
         5.0,
         [{"content": "x"}],
@@ -264,6 +272,27 @@ class _FakeRuntimeWithRecord:
         self.history = _FakeHistoryWithLength()
         self.archive = _FakeArchiveWithRecord()
         self.event_store = _FakeEventStore()
+
+
+@pytest.mark.asyncio
+async def test_chat_page_cache_rejects_recycled_runtime_id() -> None:
+    clear_chat_page_cache()
+    runtime = _FakeRuntimeWithRecord()
+    stale_owner = _WeakOwner()
+    cache_key = (id(runtime), id(runtime.history), id(runtime.event_store))
+    chat_records._chat_page_cache[cache_key] = (
+        weakref.ref(stale_owner),
+        1,
+        time.monotonic(),
+        [{"content": "stale runtime records"}],
+        1,
+    )
+    try:
+        loaded = await _load_chat_page_records(runtime)
+
+        assert loaded and loaded[0]["content"] == "hello"
+    finally:
+        clear_chat_page_cache()
 
 
 @pytest.mark.asyncio
