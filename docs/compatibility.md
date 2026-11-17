@@ -14,17 +14,28 @@
 - `migration_set_id`：迁移集标识；空表示基线。
 - `irreversible`：是否包含不可逆迁移。
 - `planes`：`root_config` / `persona_db` / `maintenance` / `rag` / `projection`
-  各自的 `supported_read`、`supported_write`、`target_version`。
+  各自的 `supported_read`、`supported_write`、`target_version`，以及可选的
+  `min_local_version`。
+  - 省略 `min_local_version` 时保持旧语义：本地版本必须恰好等于
+    `target_version`，否则返回 `migration_required` 或 `downgrade_required`。
+  - 设置后允许本地版本落在 `[min_local_version, supported_read]`：用于
+    “代码启动时自行迁移”的场景。例如 karen.db v2 版本声明
+    `min_local_version=1, target_version=2`，旧 v1 库可以直接启动并自动迁移，
+    迁移后再以 v2 通过门禁。
 - `required_features`：目标代码依赖的数据能力，例如未来的
   `stable_seq`、`tombstone_read_barrier`、`asset_epoch`。
 - `optional_features`：仅供展示/审计的能力。
 
-当前基线（2026-10-24）：
+当前基线（2026-11-17）：
 
 ```text
-root_config=2, persona_db=1, maintenance=1, rag=0, projection=0
+root_config=2, persona_db=2 (min_local=1), maintenance=1, rag=0, projection=0
 data_contract_epoch=0
 ```
+
+karen.db v1→v2 由 Runtime 首次访问时自动迁移，因此 `persona_db` 用
+`min_local_version=1` 允许 v1 启动；旧代码（manifest 仍为 persona_db=1）
+打开 v2 库会被 `supported_read` 上界拒绝。
 
 D01 的隔离迁移目标约定为 `data_contract_epoch=1`、`migration_set_id=M001`；
 生产 M001 完成前仓库基线仍保持 0，不能用普通启动/更新自动推进。

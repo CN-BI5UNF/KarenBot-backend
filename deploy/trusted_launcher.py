@@ -103,6 +103,18 @@ def _validate_manifest(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
             value = item.get(field)
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 return None, f"plane {name}.{field} 非法"
+        min_local = item.get("min_local_version")
+        if min_local is not None:
+            if (
+                not isinstance(min_local, int)
+                or isinstance(min_local, bool)
+                or min_local < 0
+            ):
+                return None, f"plane {name}.min_local_version 非法"
+            if min_local > item["target_version"]:
+                return None, (
+                    f"plane {name} 的 min_local_version 不能高于 target_version"
+                )
         if item["supported_write"] > item["supported_read"]:
             return None, f"plane {name} 的 supported_write 不能高于 supported_read"
         if item["target_version"] > item["supported_write"]:
@@ -550,19 +562,23 @@ def evaluate(
                 local=local,
             )
         value = int(probe["user_version"])
+        min_local = target.get("min_local_version")
+        lower_bound = (
+            target["target_version"] if min_local is None else int(min_local)
+        )
         if value > target["supported_read"] or value > target["supported_write"]:
             code, message = (
                 "unsupported_data_contract",
                 f"{probe.get('path')} 本地版本 v{value} 超出目标支持范围 "
                 f"(read<=v{target['supported_read']}, write<=v{target['supported_write']})",
             )
-        elif target["target_version"] > value:
+        elif value < lower_bound:
             code, message = (
                 "migration_required",
                 f"{probe.get('path')} 需要从 v{value} 迁移到 "
                 f"v{target['target_version']}",
             )
-        elif target["target_version"] < value:
+        elif min_local is None and target["target_version"] < value:
             code, message = (
                 "downgrade_required",
                 f"{probe.get('path')} 目标版本 v{target['target_version']} "
@@ -580,18 +596,22 @@ def evaluate(
     for name in PLANE_NAMES:
         target = target_planes[name]
         value = int(local_planes.get(name, 0))
+        min_local = target.get("min_local_version")
+        lower_bound = (
+            target["target_version"] if min_local is None else int(min_local)
+        )
         if value > target["supported_read"] or value > target["supported_write"]:
             code, message = (
                 "unsupported_data_contract",
                 f"{name} 本地版本 v{value} 超出目标支持范围 "
                 f"(read<=v{target['supported_read']}, write<=v{target['supported_write']})",
             )
-        elif target["target_version"] > value:
+        elif value < lower_bound:
             code, message = (
                 "migration_required",
                 f"{name} 需要从 v{value} 迁移到 v{target['target_version']}",
             )
-        elif target["target_version"] < value:
+        elif min_local is None and target["target_version"] < value:
             code, message = (
                 "downgrade_required",
                 f"{name} 目标版本 v{target['target_version']} 低于本地 v{value}",

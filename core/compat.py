@@ -73,6 +73,15 @@ class PlaneSupport:
     supported_read: int
     supported_write: int
     target_version: int
+    # 允许自动迁移的本地版本下界。None 表示沿用旧语义：本地版本必须
+    # 恰好等于 target_version；设置后允许 [min_local_version, supported_read]。
+    min_local_version: int | None = None
+
+    @property
+    def lower_bound(self) -> int:
+        if self.min_local_version is None:
+            return self.target_version
+        return self.min_local_version
 
 
 @dataclass(frozen=True)
@@ -216,6 +225,17 @@ def parse_manifest(raw: str | bytes) -> CompatManifest:
         read_v = _require_int(item.get("supported_read"), f"{name}.supported_read")
         write_v = _require_int(item.get("supported_write"), f"{name}.supported_write")
         target_v = _require_int(item.get("target_version"), f"{name}.target_version")
+        min_local_raw = item.get("min_local_version")
+        min_local_v: int | None = None
+        if min_local_raw is not None:
+            min_local_v = _require_int(
+                min_local_raw, f"{name}.min_local_version"
+            )
+            if min_local_v > target_v:
+                raise CompatError(
+                    "manifest_invalid",
+                    f"{name} 的 min_local_version 不能高于 target_version",
+                )
         if write_v > read_v:
             raise CompatError(
                 "manifest_invalid",
@@ -226,7 +246,12 @@ def parse_manifest(raw: str | bytes) -> CompatManifest:
                 "manifest_invalid",
                 f"{name} 的 target_version 不能高于 supported_write",
             )
-        planes[name] = PlaneSupport(read_v, write_v, target_v)
+        planes[name] = PlaneSupport(
+            read_v,
+            write_v,
+            target_v,
+            min_local_v,
+        )
 
     required = _feature_set(data.get("required_features"), "required_features")
     optional = _feature_set(data.get("optional_features"), "optional_features")
@@ -659,13 +684,13 @@ def evaluate(
                 f"{probe.relative_path} 本地版本 v{local_version} 超出目标支持范围 "
                 f"(read<=v{support.supported_read}, write<=v{support.supported_write})",
             )
-        if support.target_version > local_version:
+        if local_version < support.lower_bound:
             return blocked(
                 "migration_required",
                 f"{probe.relative_path} 需要从 v{local_version} 迁移到 "
                 f"v{support.target_version}；自动更新不执行迁移",
             )
-        if support.target_version < local_version:
+        if support.min_local_version is None and support.target_version < local_version:
             return blocked(
                 "downgrade_required",
                 f"{probe.relative_path} 目标版本 v{support.target_version} 低于本地 "
@@ -681,13 +706,13 @@ def evaluate(
                 f"{plane} 本地版本 v{local_version} 超出目标支持范围 "
                 f"(read<=v{support.supported_read}, write<=v{support.supported_write})",
             )
-        if support.target_version > local_version:
+        if local_version < support.lower_bound:
             return blocked(
                 "migration_required",
                 f"{plane} 需要从 v{local_version} 迁移到 v{support.target_version}；"
                 "自动更新不执行迁移",
             )
-        if support.target_version < local_version:
+        if support.min_local_version is None and support.target_version < local_version:
             return blocked(
                 "downgrade_required",
                 f"{plane} 目标版本 v{support.target_version} 低于本地 v{local_version}，"

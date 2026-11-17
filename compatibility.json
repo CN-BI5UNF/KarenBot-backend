@@ -11,9 +11,10 @@
       "target_version": 2
     },
     "persona_db": {
-      "supported_read": 1,
-      "supported_write": 1,
-      "target_version": 1
+      "supported_read": 2,
+      "supported_write": 2,
+      "target_version": 2,
+      "min_local_version": 1
     },
     "maintenance": {
       "supported_read": 1,
