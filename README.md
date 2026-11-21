@@ -76,20 +76,22 @@ sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
 
 ## 安装器如何组合
 
-安装器的在线安装会把本仓库作为“核心程序 + 后端”基础包，再下载用户选择的
-`KarenBot-GUI` 或 `KarenBot-WebUI` 源码包，把 `gui/` 或 `webui/` 合并到应用根目录。
-这样不需要额外的第四个仓库，也不会在仓库里复制前端代码。
+v2 起安装器从 `CN-BI5UNF/KarenBot` 的统一 Release 下载 `modules.json`、本仓库资产
+和用户选择的 GUI/WebUI 资产，按 manifest 校验后把 `gui/` 或 `webui/` 合并到应用根目录。
+本仓库仍可作为开发时的核心基础包单独拉取，但正式安装/更新以 KarenBot 统一发行为准。
 
 ## 版本
 
 | 项目 | 版本 |
 |---|---|
-| 本仓库发布版本 | `v0.1.11-alpha` |
-| 应用代码版本 | `1.0.11-alpha` |
-| 配套界面模块 | `v0.1.1-alpha.1` |
+| 本仓库发布版本 | `v0.1.11-alpha.1` |
+| 应用代码版本 | `1.0.11-alpha.1` |
+| 配套界面模块 | `v0.1.1-alpha.2` |
+| v2 统一发行版 | `v2.0.0-alpha`（升级后手动选择） |
 
 `VERSION` 是模块发布版本，`backend/__init__.py` 中的代码版本沿用应用兼容版本。
-核心程序合并进入 `main` 后，发布 tag/Release 会在验证通过后同步更新。
+过渡版本发布后，更新源切换为 KarenBot 主仓库的统一发行版；v2 组件 tag/Release
+只用于源码回溯和 submodule 固定。
 
 ## 安全边界
 

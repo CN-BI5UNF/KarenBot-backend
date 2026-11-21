@@ -199,9 +199,21 @@ def _http_error(exc: UpdateError | ModuleUpdateError) -> HTTPException:
             "github_auth_required",
             "github_repo_unavailable",
             "release_invalid",
+            "module_manifest_invalid",
+            "module_asset_missing",
+            "module_checksum_mismatch",
+            "module_layout_invalid",
+            "module_too_large",
             "prerelease_confirmation_required",
         }:
-            status = 400 if exc.code == "release_invalid" else 409
+            status = 400 if exc.code in {
+                "release_invalid",
+                "module_manifest_invalid",
+                "module_asset_missing",
+                "module_checksum_mismatch",
+                "module_layout_invalid",
+                "module_too_large",
+            } else 409
         return HTTPException(
             status_code=status,
             detail={"code": exc.code, "message": exc.message, "mode": "module"},

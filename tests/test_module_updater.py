@@ -1,8 +1,9 @@
-"""Split backend/frontend module updater tests (GitHub Releases contract)."""
+"""Unified KarenBot distribution updater tests (GitHub Releases contract)."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -14,57 +15,145 @@ import pytest
 
 import backend.module_updater as updater_module
 from backend.module_updater import (
+    DISTRIBUTION_REPO,
     MANIFEST_FILENAME,
     ModuleUpdateError,
     ModuleUpdateService,
 )
 
 
-def _tar(module: str, version: str, content: str = "hello\n") -> bytes:
-    return _tar_files(
-        {
-            "VERSION": version + "\n",
-            f"{module}/__init__.py": content,
-        }
-    )
-
-
-def _tar_files(files: dict[str, str]) -> bytes:
+def _tar_files(files: dict[str, str], *, prefix: str = "owner-repo-deadbeef") -> bytes:
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w:gz") as tar:
         for name, data in files.items():
             payload = data.encode()
-            info = tarfile.TarInfo(f"owner-repo-deadbeef/{name}")
+            info = tarfile.TarInfo(f"{prefix}/{name}")
             info.size = len(payload)
             info.mode = 0o644
             tar.addfile(info, io.BytesIO(payload))
     return raw.getvalue()
 
 
+def _default_backend(tag: str) -> dict[str, str]:
+    version = tag.lstrip("vV")
+    return {
+        "VERSION": version + "\n",
+        "backend/__init__.py": f"backend {tag}\n",
+    }
+
+
+def _default_gui(tag: str) -> dict[str, str]:
+    version = tag.lstrip("vV")
+    return {
+        "VERSION": version + "\n",
+        "gui/__init__.py": f"gui {tag}\n",
+    }
+
+
 class FakeGitHub:
     def __init__(self) -> None:
         self.releases_by_repo: dict[str, list[dict]] = {}
-        self.tarballs: dict[tuple[str, str], bytes] = {}
+        self.assets: dict[str, bytes] = {}
+        self.manifest_by_url: dict[str, dict] = {}
+
+    def add_release(
+        self,
+        tag: str,
+        *,
+        backend: dict[str, str] | None = None,
+        gui: dict[str, str] | None = None,
+        webui: dict[str, str] | None = None,
+        prerelease: bool = False,
+        published: str = "",
+        manifest_mutator=None,
+    ) -> dict:
+        backend = backend if backend is not None else _default_backend(tag)
+        gui = gui if gui is not None else _default_gui(tag)
+        files_by_component = {
+            "backend": backend,
+            "gui": gui,
+            "webui": webui,
+        }
+        assets = []
+        components = {}
+        manifest_url = (
+            f"https://api.github.com/repos/{DISTRIBUTION_REPO}/releases/assets/"
+            f"manifest-{tag}"
+        )
+        for component, files in files_by_component.items():
+            if files is None:
+                continue
+            payload = _tar_files(
+                files, prefix=f"KarenBot-{component}-{tag}"
+            )
+            name = updater_module.DISTRIBUTION_ASSET_NAMES[component].format(
+                tag=tag
+            )
+            url = (
+                f"https://api.github.com/repos/{DISTRIBUTION_REPO}/releases/"
+                f"assets/{component}-{tag}"
+            )
+            self.assets[url] = payload
+            assets.append(
+                {
+                    "id": len(assets) + 1,
+                    "name": name,
+                    "size": len(payload),
+                    "content_type": "application/gzip",
+                    "url": url,
+                    "browser_download_url": url,
+                }
+            )
+            components[component] = {
+                "repo": updater_module.MODULE_REPOS[component],
+                "tag": tag,
+                "version": tag.lstrip("vV"),
+                "asset": name,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+            }
+        assets.append(
+            {
+                "id": 99,
+                "name": updater_module.DISTRIBUTION_MANIFEST,
+                "size": 128,
+                "content_type": "application/json",
+                "url": manifest_url,
+                "browser_download_url": manifest_url,
+            }
+        )
+        manifest = {
+            "schema": 1,
+            "release": tag,
+            "components": components,
+        }
+        if manifest_mutator is not None:
+            manifest_mutator(manifest)
+        self.manifest_by_url[manifest_url] = manifest
+        release = {
+            "tag": tag,
+            "tag_name": tag,
+            "name": tag,
+            "body": f"notes for {tag}",
+            "prerelease": prerelease,
+            "published_at": published,
+            "html_url": f"https://example.invalid/{tag}",
+            "tarball_url": "",
+            "assets": assets,
+            "id": tag,
+        }
+        self.releases_by_repo.setdefault(DISTRIBUTION_REPO, []).append(release)
+        return release
 
     def releases(self, repo: str) -> list[dict]:
+        assert repo == DISTRIBUTION_REPO
         return list(self.releases_by_repo.get(repo, []))
 
-    def download_tarball(self, repo: str, tag: str, destination: Path) -> None:
-        destination.write_bytes(self.tarballs[(repo, tag)])
+    def download_asset(self, asset: dict, destination: Path) -> None:
+        destination.write_bytes(self.assets[asset["url"]])
 
-
-def _release(tag: str, *, prerelease: bool = False, published: str = "") -> dict:
-    return {
-        "tag": tag,
-        "tag_name": tag,
-        "name": tag,
-        "body": f"notes for {tag}",
-        "prerelease": prerelease,
-        "published_at": published,
-        "html_url": f"https://example.invalid/{tag}",
-        "tarball_url": "",
-        "id": tag,
-    }
+    def download_json_asset(self, asset: dict):
+        return json.loads(json.dumps(self.manifest_by_url[asset["url"]]))
 
 
 @pytest.fixture
@@ -105,35 +194,47 @@ def _service(workspace, fake: FakeGitHub) -> ModuleUpdateService:
     return ModuleUpdateService(root, data, "gui", client=fake)
 
 
-def test_backend_only_stable_update_is_available(workspace):
+def test_stable_release_updates_backend_and_frontend(workspace):
     root, data = workspace
     fake = FakeGitHub()
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-backend"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-GUI"] = [
-        _release("v0.0.1-dev", published="2026-11-10T00:00:00Z")
-    ]
-    fake.tarballs[
-        ("CN-BI5UNF/KarenBot-backend", "v0.0.2")
-    ] = _tar("backend", "0.0.2", "new backend\n")
+    fake.add_release(
+        "v0.0.2",
+        backend={
+            "VERSION": "0.0.2\n",
+            "backend/__init__.py": "new backend\n",
+        },
+        gui={
+            "VERSION": "0.0.2\n",
+            "gui/__init__.py": "new gui\n",
+        },
+        published="2026-11-13T00:00:00Z",
+    )
 
     service = _service(workspace, fake)
     snapshot = asyncio.run(service.check())
     assert snapshot["available"] is True
-    assert [item["component"] for item in snapshot["updates"]] == ["backend"]
     assert snapshot["can_apply"] is True
-    assert "backend" in snapshot["confirmation_token"] or snapshot["confirmation_token"]
+    assert snapshot["distribution"] is True
+    assert [item["component"] for item in snapshot["updates"]] == [
+        "backend",
+        "gui",
+    ]
+    assert len(snapshot["distribution_updates"]) == 1
+    assert snapshot["distribution_updates"][0]["component"] == "distribution"
 
     result = asyncio.run(
         service.apply(confirmation_token=snapshot["confirmation_token"])
     )
     assert result["backend_updated"] is True
-    assert result["frontend_updated"] is False
+    assert result["frontend_updated"] is True
+    assert result["distribution_updated"] is True
+    assert result["distribution_tag"] == "v0.0.2"
     assert (root / "backend" / "__init__.py").read_text(encoding="utf-8") == "new backend\n"
-    assert (root / "gui" / "app.py").read_text(encoding="utf-8") == "old gui\n"
+    assert (root / "gui" / "__init__.py").read_text(encoding="utf-8") == "new gui\n"
     manifest = json.loads((root / MANIFEST_FILENAME).read_text(encoding="utf-8"))
     assert manifest["components"]["backend"]["tag"] == "v0.0.2"
+    assert manifest["components"]["gui"]["tag"] == "v0.0.2"
+    assert manifest["distribution"]["tag"] == "v0.0.2"
 
     with pytest.raises(ModuleUpdateError) as excinfo:
         asyncio.run(
@@ -143,28 +244,47 @@ def test_backend_only_stable_update_is_available(workspace):
 
     # Re-applying an identical release updates metadata but is not reported as
     # a code update and does not require a restart.
-    same = asyncio.run(service.check("backend:v0.0.2"))
+    same = asyncio.run(service.check("distribution:v0.0.2"))
     no_op = asyncio.run(
         service.apply(confirmation_token=same["confirmation_token"])
     )
     assert no_op["updated"] == []
     assert no_op["backend_updated"] is False
+    assert no_op["frontend_updated"] is False
     assert no_op["restart_required"] is False
-    assert no_op["files"]["unchanged_files"] == 2
+
+
+def test_component_alias_also_selects_the_whole_train(workspace):
+    _root, _data = workspace
+    fake = FakeGitHub()
+    fake.add_release("v0.0.2", published="2026-11-13T00:00:00Z")
+    service = _service(workspace, fake)
+
+    checked = asyncio.run(service.check("backend:v0.0.2"))
+    assert checked["can_apply"] is True
+    assert [item["component"] for item in checked["updates"]] == [
+        "backend",
+        "gui",
+    ]
+    assert checked["target_tag"] == "distribution:v0.0.2"
 
 
 def test_prerelease_never_auto_notifies_but_can_be_manually_applied(workspace):
-    root, data = workspace
+    root, _data = workspace
     fake = FakeGitHub()
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-backend"] = [
-        _release("v0.0.2-dev", prerelease=True, published="2026-11-13T00:00:00Z")
-    ]
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-GUI"] = [
-        _release("v0.0.1-dev", published="2026-11-10T00:00:00Z")
-    ]
-    fake.tarballs[
-        ("CN-BI5UNF/KarenBot-backend", "v0.0.2-dev")
-    ] = _tar("backend", "0.0.2-dev", "prerelease backend\n")
+    fake.add_release(
+        "v0.0.2-dev",
+        backend={
+            "VERSION": "0.0.2-dev\n",
+            "backend/__init__.py": "prerelease backend\n",
+        },
+        gui={
+            "VERSION": "0.0.2-dev\n",
+            "gui/__init__.py": "prerelease gui\n",
+        },
+        prerelease=True,
+        published="2026-11-13T00:00:00Z",
+    )
     service = _service(workspace, fake)
 
     checked = asyncio.run(service.check())
@@ -189,52 +309,26 @@ def test_prerelease_never_auto_notifies_but_can_be_manually_applied(workspace):
         )
     )
     assert result["backend_updated"] is True
+    assert result["frontend_updated"] is True
     assert (
         root / "backend" / "__init__.py"
     ).read_text(encoding="utf-8") == "prerelease backend\n"
-
-
-def test_both_components_update_and_manifest(workspace):
-    root, data = workspace
-    fake = FakeGitHub()
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-backend"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-GUI"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.tarballs[("CN-BI5UNF/KarenBot-backend", "v0.0.2")] = _tar(
-        "backend", "0.0.2", "backend 2\n"
-    )
-    fake.tarballs[("CN-BI5UNF/KarenBot-GUI", "v0.0.2")] = _tar(
-        "gui", "0.0.2", "gui 2\n"
-    )
-    service = _service(workspace, fake)
-    checked = asyncio.run(service.check())
-    result = asyncio.run(
-        service.apply(confirmation_token=checked["confirmation_token"])
-    )
-    assert result["backend_updated"] is True
-    assert result["frontend_updated"] is True
-    assert result["requires_app_restart"] is True
-    assert (root / "backend" / "__init__.py").read_text(encoding="utf-8") == "backend 2\n"
-    assert (root / "gui" / "__init__.py").read_text(encoding="utf-8") == "gui 2\n"
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.0.2"
+    assert (
+        root / "gui" / "__init__.py"
+    ).read_text(encoding="utf-8") == "prerelease gui\n"
 
 
 def test_existing_file_is_backed_up_before_overwrite(workspace):
-    root, data = workspace
+    root, _data = workspace
     fake = FakeGitHub()
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-backend"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-GUI"] = []
-    fake.tarballs[("CN-BI5UNF/KarenBot-backend", "v0.0.2")] = _tar_files(
-        {
+    fake.add_release(
+        "v0.0.2",
+        backend={
             "VERSION": "0.0.2\n",
             "backend/__init__.py": "new backend\n",
             "backend/extra.py": "new extra\n",
-        }
+        },
+        published="2026-11-13T00:00:00Z",
     )
     service = _service(workspace, fake)
 
@@ -265,14 +359,15 @@ def test_existing_file_is_backed_up_before_overwrite(workspace):
 
 
 def test_program_file_update_is_backed_up(workspace):
-    root, data = workspace
+    root, _data = workspace
     fake = FakeGitHub()
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-backend"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-GUI"] = []
-    fake.tarballs[("CN-BI5UNF/KarenBot-backend", "v0.0.2")] = _tar(
-        "backend", "0.0.2", "new backend\n"
+    fake.add_release(
+        "v0.0.2",
+        backend={
+            "VERSION": "0.0.2\n",
+            "backend/__init__.py": "new backend\n",
+        },
+        published="2026-11-13T00:00:00Z",
     )
     service = _service(workspace, fake)
 
@@ -294,14 +389,12 @@ def test_program_file_update_is_backed_up(workspace):
 
 
 def test_single_file_release_applies(workspace):
-    root, data = workspace
+    root, _data = workspace
     fake = FakeGitHub()
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-backend"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-GUI"] = []
-    fake.tarballs[("CN-BI5UNF/KarenBot-backend", "v0.0.2")] = _tar_files(
-        {"backend/__init__.py": "new backend\n"}
+    fake.add_release(
+        "v0.0.2",
+        backend={"backend/__init__.py": "new backend\n"},
+        published="2026-11-13T00:00:00Z",
     )
     service = _service(workspace, fake)
     checked = asyncio.run(service.check())
@@ -321,25 +414,18 @@ def test_single_file_release_applies(workspace):
 
 
 def test_frontend_overlay_backs_up_and_keeps_unrelated_files(workspace):
-    root, data = workspace
+    root, _data = workspace
     (root / "gui" / "legacy.py").write_text("legacy gui\n", encoding="utf-8")
     fake = FakeGitHub()
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-backend"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-GUI"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.tarballs[("CN-BI5UNF/KarenBot-backend", "v0.0.2")] = _tar(
-        "backend", "0.0.2", "backend 2\n"
-    )
-    fake.tarballs[("CN-BI5UNF/KarenBot-GUI", "v0.0.2")] = _tar_files(
-        {
+    fake.add_release(
+        "v0.0.2",
+        gui={
             "VERSION": "0.0.2\n",
             "gui/__init__.py": "gui 2\n",
             "gui/extra.py": "extra gui\n",
             "gui/app.py": "release gui\n",
-        }
+        },
+        published="2026-11-13T00:00:00Z",
     )
     service = _service(workspace, fake)
 
@@ -375,12 +461,9 @@ def test_backend_release_never_writes_user_data(workspace):
     (root / "secrets.enc").write_text("sealed\n", encoding="utf-8")
 
     fake = FakeGitHub()
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-backend"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-GUI"] = []
-    fake.tarballs[("CN-BI5UNF/KarenBot-backend", "v0.0.2")] = _tar_files(
-        {
+    fake.add_release(
+        "v0.0.2",
+        backend={
             "VERSION": "0.0.2\n",
             "backend/__init__.py": "new backend\n",
             "karen": "#!/bin/sh\necho karen\n",
@@ -393,7 +476,8 @@ def test_backend_release_never_writes_user_data(workspace):
             ".env": "TOKEN=release\n",
             "secrets.enc": "release sealed\n",
             "workspace/file.txt": "release workspace\n",
-        }
+        },
+        published="2026-11-13T00:00:00Z",
     )
     service = _service(workspace, fake)
     checked = asyncio.run(service.check())
@@ -434,19 +518,67 @@ def test_backend_release_never_writes_user_data(workspace):
     assert not (root / "workspace" / "file.txt").exists()
 
 
+def test_manifest_hash_mismatch_writes_nothing(workspace):
+    root, _data = workspace
+    fake = FakeGitHub()
+    fake.add_release(
+        "v0.0.2",
+        backend={
+            "VERSION": "0.0.2\n",
+            "backend/__init__.py": "new backend\n",
+        },
+        published="2026-11-13T00:00:00Z",
+        manifest_mutator=lambda manifest: manifest["components"]["backend"].update(
+            {"sha256": "0" * 64}
+        ),
+    )
+    service = _service(workspace, fake)
+
+    checked = asyncio.run(service.check())
+    with pytest.raises(ModuleUpdateError) as excinfo:
+        asyncio.run(
+            service.apply(confirmation_token=checked["confirmation_token"])
+        )
+
+    assert excinfo.value.code == "module_checksum_mismatch"
+    assert (
+        root / "backend" / "__init__.py"
+    ).read_text(encoding="utf-8") == "old backend\n"
+    manifest = json.loads((root / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert manifest["components"]["backend"]["tag"] == "v0.0.1-dev"
+
+
+def test_invalid_manifest_is_reported_and_not_selectable(workspace):
+    _root, _data = workspace
+    fake = FakeGitHub()
+    fake.add_release(
+        "v0.0.2",
+        published="2026-11-13T00:00:00Z",
+        manifest_mutator=lambda manifest: manifest.pop("components"),
+    )
+    service = _service(workspace, fake)
+
+    releases = asyncio.run(service.releases())
+    assert releases["distribution_releases"] == []
+    assert any(
+        "module_manifest_invalid" in value
+        for value in releases["errors"].values()
+    )
+    checked = asyncio.run(service.check())
+    assert checked["can_apply"] is False
+
+
 def test_overlay_failure_rolls_back_every_written_file(workspace, monkeypatch):
     root, _data = workspace
     fake = FakeGitHub()
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-backend"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-GUI"] = []
-    fake.tarballs[("CN-BI5UNF/KarenBot-backend", "v0.0.2")] = _tar_files(
-        {
+    fake.add_release(
+        "v0.0.2",
+        backend={
             "VERSION": "0.0.2\n",
             "backend/__init__.py": "new backend\n",
             "backend/z_fail.py": "fail\n",
-        }
+        },
+        published="2026-11-13T00:00:00Z",
     )
     service = _service(workspace, fake)
     checked = asyncio.run(service.check())
@@ -481,16 +613,14 @@ def test_symlinked_path_components_abort_and_roll_back(workspace):
     except (OSError, NotImplementedError):
         pytest.skip("symlinks unavailable")
     fake = FakeGitHub()
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-backend"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-GUI"] = []
-    fake.tarballs[("CN-BI5UNF/KarenBot-backend", "v0.0.2")] = _tar_files(
-        {
+    fake.add_release(
+        "v0.0.2",
+        backend={
             "VERSION": "0.0.2\n",
             "backend/__init__.py": "new backend\n",
             "core/x.py": "must not escape\n",
-        }
+        },
+        published="2026-11-13T00:00:00Z",
     )
     service = _service(workspace, fake)
     checked = asyncio.run(service.check())
@@ -537,16 +667,14 @@ def test_rollback_failure_is_reported(workspace, monkeypatch):
     except (OSError, NotImplementedError):
         pytest.skip("symlinks unavailable")
     fake = FakeGitHub()
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-backend"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-GUI"] = []
-    fake.tarballs[("CN-BI5UNF/KarenBot-backend", "v0.0.2")] = _tar_files(
-        {
+    fake.add_release(
+        "v0.0.2",
+        backend={
             "VERSION": "0.0.2\n",
             "backend/__init__.py": "new backend\n",
             "core/x.py": "must not escape\n",
-        }
+        },
+        published="2026-11-13T00:00:00Z",
     )
     service = _service(workspace, fake)
     checked = asyncio.run(service.check())
@@ -597,12 +725,13 @@ def test_worktree_summary_counts_clean_and_dirty_files(workspace):
     (root / "untracked.txt").write_text("new\n", encoding="utf-8")
 
     fake = FakeGitHub()
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-backend"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-GUI"] = []
-    fake.tarballs[("CN-BI5UNF/KarenBot-backend", "v0.0.2")] = _tar(
-        "backend", "0.0.2", "updated\n"
+    fake.add_release(
+        "v0.0.2",
+        backend={
+            "VERSION": "0.0.2\n",
+            "backend/__init__.py": "updated\n",
+        },
+        published="2026-11-13T00:00:00Z",
     )
     service = _service(workspace, fake)
     summary = service._worktree_summary()
@@ -626,13 +755,7 @@ def test_worktree_summary_counts_clean_and_dirty_files(workspace):
 
 def test_git_status_failure_does_not_block_update(workspace, monkeypatch):
     fake = FakeGitHub()
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-backend"] = [
-        _release("v0.0.2", published="2026-11-13T00:00:00Z")
-    ]
-    fake.releases_by_repo["CN-BI5UNF/KarenBot-GUI"] = []
-    fake.tarballs[("CN-BI5UNF/KarenBot-backend", "v0.0.2")] = _tar(
-        "backend", "0.0.2"
-    )
+    fake.add_release("v0.0.2", published="2026-11-13T00:00:00Z")
     service = _service(workspace, fake)
     monkeypatch.setattr(
         service,
@@ -656,6 +779,72 @@ def test_git_status_failure_does_not_block_update(workspace, monkeypatch):
     assert checked["can_apply"] is True
     assert any("无法读取 Git 工作树状态" in w for w in checked["warnings"])
     assert not any("0 个改动/未跟踪文件" in w for w in checked["warnings"])
+
+
+def test_webui_service_only_writes_the_active_frontend(tmp_path):
+    root = tmp_path / "app"
+    (root / "backend").mkdir(parents=True)
+    (root / "webui").mkdir()
+    (root / "backend" / "__init__.py").write_text(
+        "old backend\n", encoding="utf-8"
+    )
+    (root / "webui" / "app.js").write_text("old webui\n", encoding="utf-8")
+    (root / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "frontend": "webui",
+                "components": {
+                    "backend": {
+                        "repo": "CN-BI5UNF/KarenBot-backend",
+                        "dir": "backend",
+                        "tag": "v0.0.1-dev",
+                        "version": "0.0.1-dev",
+                    },
+                    "webui": {
+                        "repo": "CN-BI5UNF/KarenBot-WebUI",
+                        "dir": "webui",
+                        "tag": "v0.0.1-dev",
+                        "version": "0.0.1-dev",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake = FakeGitHub()
+    fake.add_release(
+        "v0.0.2",
+        backend={
+            "VERSION": "0.0.2\n",
+            "backend/__init__.py": "new backend\n",
+        },
+        gui=_default_gui("v0.0.2"),
+        webui={
+            "VERSION": "0.0.2\n",
+            "webui/__init__.py": "new webui\n",
+        },
+        published="2026-11-13T00:00:00Z",
+    )
+    service = ModuleUpdateService(
+        root, tmp_path / "data", "webui", client=fake
+    )
+    checked = asyncio.run(service.check())
+    result = asyncio.run(
+        service.apply(confirmation_token=checked["confirmation_token"])
+    )
+    assert result["backend_updated"] is True
+    assert result["frontend_updated"] is True
+    assert (root / "backend" / "__init__.py").read_text(
+        encoding="utf-8"
+    ) == "new backend\n"
+    assert (root / "webui" / "__init__.py").read_text(
+        encoding="utf-8"
+    ) == "new webui\n"
+    assert not (root / "gui").exists()
+    manifest = json.loads((root / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert manifest["frontend"] == "webui"
+    assert manifest["components"]["webui"]["tag"] == "v0.0.2"
 
 
 def test_api_builds_module_service_from_frontend(workspace):

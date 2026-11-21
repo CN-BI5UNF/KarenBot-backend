@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.1.11-alpha.1 — 2026-11-21
+
+过渡版本：后端模块 `0.1.11-alpha.1`，应用代码 `1.0.11-alpha.1`。升级后更新源切换为 `CN-BI5UNF/KarenBot` 的**统一发行版**；请在本版本更新页手动选择 `v2.0.0-alpha`。
+
+- 更新器改为读取 KarenBot 主仓库 Release：`modules.json` 描述后端/GUI/WebUI 三个组件资产，下载后逐资产校验 SHA256；任何入口都同时更新后端与当前前端，避免半套更新。
+- 保留旧 GUI/WebUI 可读的组件别名；过渡期间即使前端尚未升级，也能看到并应用同一发行版。
+- 新增 `distribution` 状态、`distribution_releases`/`distribution_updates` 字段；Pre-release 仍需手动选择并显式确认。
+- 适配器层拆为 `adapters/transports/`（WS 客户端/服务端、HTTP API、HTTP POST Webhook）与 `adapters/onebot11/`（标准协议 + NapCat/LLOneBot/Lagrange/go-cqhttp 方言）；`adapters/napcat/` 保留为兼容薄壳。
+- OneBot 11 支持正向/反向 WS、HTTP API、HTTP POST 三种接入方式；反向 WS 支持 API/Event 双连接、多账号 `X-Self-ID`、Header/Query 鉴权；HTTP POST 支持 HMAC-SHA1 验签。
+- 新增结构化 `MessageSegment` IR（文本/@/引用/图片/语音/视频/文件/表情/合并转发/Raw）、数组/CQ 双向编解码、全量标准事件与方言能力表。
+- 发送链路改为结构化段：reply/@/face 不再由业务层拼 CQ；旧 action 的 CQ 标记只在 `adapters/outbound.py` 边界兼容。
+- 配置改为判别联合 `AdapterConfig`，旧 `type: napcat` 与 `mode: client/server` 零修改兼容；黑白名单 ID 字符串化，支持 `user_ids` 别名和 Telegram 负数群 ID。
+- 工具按 `AdapterCapabilities` 动态过滤；`get_msg`/`send_poke`/表情回应/群管改用适配器语义方法。
+- 新增 Telegram Bot API 适配器（长轮询/Webhook、文本分片、图片/语音/视频/文件、引用、表情回应、撤回、topic/thread_id、媒体下载、UTF-16 实体偏移、429 重试、offset 持久化）。
+- 新增 `GET /api/adapters/protocols`（协议目录 + 配置 JSON Schema）、`GET/PUT /api/adapters/config`（完整配置读写/热重载）与 `GET /api/adapters/status`（连接状态/能力表）。
+- 安全收紧：反向 WS/Webhook 默认只监听回环；非回环监听强制要求 token/secret；Webhook 流式限长；HTTPS 客户端日志抑制 token 泄漏；语音下载限制为公网 URL；热重载失败回滚旧适配器。
+- ⚠️ 升级提示：`ws_server` 的 `host: 127.0.0.1` 现在只监听本机（不再自动改 0.0.0.0）；跨设备反向 WS 请显式设 `host: 0.0.0.0` 并配置 `access_token_id`。
+- ⚠️ 升级提示：`access_token_id` / `webhook_secret_id` / 注入的 Telegram token 引用不存在时，适配器现在拒绝启动，不再静默降级为无鉴权。
+- 新增 60+ 协议/发送/配置/安全回归测试；全量 269 项测试通过，ruff 通过。
+- 新增通用「外部程序」托管：`programs` 配置 + `ExternalProgramManager`，可在 Runtime 启动后拉起多个自定义程序；启动失败只记 ERROR/状态提醒，不影响主流程；关闭时只停止由 Karen 成功拉起且仍存活、`stop_with_karen=True` 的进程；支持端口探测跳过、自动重启、自定义环境变量/工作目录。
+- 配置版本升至 v3：`adapters.*.manage_process/process_path/process_args/auto_restart/process_warmup_seconds` 自动迁移为 `programs.napcat_*`，旧字段删除；兼容门禁允许 v2 配置先通过再迁移。
+- 新增 `GET/PUT /api/settings/programs` 与单程序 start/stop 接口；`/api/status` 增加结构化 `programs` 状态，EventHub 状态指纹包含程序状态/失败序号。
+- GUI/WebUI 设置页新增「外部程序」面板；失败按 `failure_seq` 去重弹窗提醒。
+
 ## v0.1.11-alpha — 2026-11-18
 
 后端模块版本 `v0.1.11-alpha`，应用代码版本 `1.0.11-alpha`。基于 `v0.1.9-alpha`，包含其全部改动。

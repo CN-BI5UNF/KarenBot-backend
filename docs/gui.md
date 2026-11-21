@@ -245,38 +245,38 @@ WebUI 控制台的主要页面、设置字段、热应用、分步向导和危�
 4. 更新/回退已接入，但依赖真实干净工作树与远端 Release 做端到端演练；当前本地
    开发树通常有未提交改动，因此只验证了检查、确认、阻止与 GUI 后端重启流程。
 
-## 分模块更新（backend + GUI）
+## 统一发行版更新（backend + GUI）
 
-GUI 的「设置 → 更新」现在按**独立模块仓库**工作，而不是更新一个合并源码仓库：
+GUI 的「设置 → 更新」优先读取 `CN-BI5UNF/KarenBot` 的统一发行版：
 
-| 组件 | 仓库 |
+| 资产 | 内容 |
 |---|---|
-| 后端 | `https://github.com/CN-BI5UNF/KarenBot-backend` |
-| GUI 前端 | `https://github.com/CN-BI5UNF/KarenBot-GUI` |
+| `modules.json` | 发行版清单、组件 tag/version、资产名与 SHA256 |
+| `KarenBot-backend-<tag>.tar.gz` | 完整后端程序 |
+| `KarenBot-GUI-<tag>.tar.gz` | `gui/` |
+| `KarenBot-WebUI-<tag>.tar.gz` | `webui/` |
 
-后端发布包包含完整后端程序（`backend/`、`core/`、`memory/`、`providers/`、`tools/` 等）；更新按白名单把发布文件叠加到应用根目录，前端只更新 `gui/` 或 `webui/`。`data/`、`personas/`、`plugins/`、`config.yaml` 等用户数据不会被覆盖，更新也不会删除文件。每个被替换的旧文件都会先备份到数据目录的 `module_backups/<时间戳>/`。
+每次更新都会同时写后端与当前前端，不能只更新一个组件。后端包按白名单叠加到应用根目录，前端只更新 `gui/` 或 `webui/`。`data/`、`personas/`、`plugins/`、`config.yaml` 等用户数据不会被覆盖，更新也不会删除文件。每个被替换的旧文件都会先备份到数据目录的 `module_backups/<时间戳>/`。
 
 ### Latest 与 Pre-release
 
 - GitHub Release 勾选 **Latest**（非 Pre-release）时，自动检查和总览徽标会提示更新。
 - 勾选 **Pre-release** 的版本**不会自动提示**，但会出现在「远端版本」列表中；用户可以手动选择更新，确认框会明确提示“极不稳定”，并要求显式确认。
-- Pre-release 是每个组件独立判断的：后端有 Pre-release、GUI 没有时，只会提示后端的 Pre-release。
-- 后端单独发布修复版、GUI 未变化时，只显示后端更新；反之亦然。
+- `v2.0.0-alpha` 是 Pre-release；从 0.1.x 过渡版本升级时必须手动选择。
 
-### 私有仓库凭据
+### 仓库凭据
 
-三个模块仓库当前是私有仓库，更新检查需要 GitHub Releases API 权限。任选一种方式：
+三个组件仓库和 KarenBot 主仓库当前都是公开仓库；公开安装无需令牌。若使用私有镜像/私有 fork，任选一种方式提供只读凭据：
 
 1. `gh auth login` 登录有 `repo` 权限的账号；
 2. 设置 `KAREN_GITHUB_TOKEN`（或 `GH_TOKEN` / `GITHUB_TOKEN`）；
 3. 把 token 写入 `~/.local/share/KarenBot/instances/default/github_token.txt`（权限 0600），GUI 不会把 token 展示在界面或日志里。
 
-目标 token 至少需要读取这些仓库的 Releases/源码（classic PAT 的 `repo` scope，或 fine-grained token 的 Contents read + Metadata read）。
-
 ### 应用更新后的重启规则
 
-- 仅后端更新：刷新/重启 GUI 本地后端即可加载新的 Python 代码。
-- GUI 前端更新：必须完全退出并重新打开 GUI；仅重启后端不会替换已经加载的界面代码。
+- 统一发行版总是包含后端：更新后必须重启本地后端以加载新的 Python 代码。
+- GUI 前端也同时更新：必须完全退出并重新打开 GUI；仅重启后端不会替换已经加载的界面代码。
+- WebUI 前端同时更新：刷新浏览器页面即可。
 - 工作树有未提交改动不会阻止更新。更新采用文件级叠加，只覆盖发布包中的
   程序文件；与更新范围重叠的本地改动会先逐个备份到
   `数据目录/module_backups/<时间戳>/`，再写入发布版，便于恢复。
