@@ -1069,6 +1069,35 @@ class ModuleUpdateService:
             "prerelease_available": component["prerelease_available"],
         }
 
+    def _normalise_components(self, components: Any) -> list[str]:
+        frontend = FRONTEND_COMPONENT[self.frontend]
+        allowed = ("backend", frontend)
+        if components is None:
+            return list(allowed)
+        if isinstance(components, str):
+            raw_values = [components]
+        elif isinstance(components, (list, tuple, set)):
+            raw_values = list(components)
+        else:
+            raise ModuleUpdateError(
+                "invalid_component", "components 必须是组件名数组"
+            )
+        selected: list[str] = []
+        for value in raw_values:
+            name = str(value or "").strip()
+            if name not in allowed:
+                raise ModuleUpdateError(
+                    "invalid_component",
+                    f"只能选择 {', '.join(allowed)}；收到 {name!r}",
+                )
+            if name not in selected:
+                selected.append(name)
+        if not selected:
+            raise ModuleUpdateError(
+                "invalid_component", "至少选择一个要更新的组件"
+            )
+        return selected
+
     # ------------------------------------------------------------------
     # Public read-only API
     # ------------------------------------------------------------------
@@ -1325,7 +1354,12 @@ class ModuleUpdateService:
     # ------------------------------------------------------------------
     # Check / apply
     # ------------------------------------------------------------------
-    async def check(self, target_tag: str | None = None) -> dict[str, Any]:
+    async def check(
+        self,
+        target_tag: str | None = None,
+        components: Any = None,
+    ) -> dict[str, Any]:
+        requested_components = self._normalise_components(components)
         catalog = await self._fetch_catalog(force=True)
         distribution_releases = list(
             catalog.get("distribution_releases") or []
@@ -1378,7 +1412,7 @@ class ModuleUpdateService:
                     "distribution",
                     selected_release["release_tag"],
                     selected_release,
-                    tuple(selected_release["component_releases"].keys()),
+                    tuple(requested_components),
                 )
             )
         worktree = await asyncio.to_thread(self._worktree_summary)
@@ -1405,22 +1439,54 @@ class ModuleUpdateService:
                 "不会阻止更新；每个被发布版替换的程序文件都会先备份到数据目录的 "
                 "module_backups/，可从中恢复。"
             )
+        frontend_component = FRONTEND_COMPONENT[self.frontend]
         if selected_release is not None:
-            warnings.append(
-                "这是 KarenBot 统一发行版：会同时更新后端与当前前端，"
-                "不能只更新其中一个组件。"
+            selected_labels = "、".join(
+                MODULE_LABELS[component]
+                for component in requested_components
             )
+            if set(requested_components) == {"backend", frontend_component}:
+                warnings.append(
+                    "这是 KarenBot 统一发行版：会同时更新后端与当前前端。"
+                )
+            else:
+                kept = [
+                    MODULE_LABELS[component]
+                    for component in ("backend", frontend_component)
+                    if component not in requested_components
+                ]
+                warnings.append(
+                    f"本次只更新 {selected_labels}；"
+                    f"{'、'.join(kept)} 保持当前版本。"
+                    "前后端版本可能不一致，如出现接口错误，请再更新另一组件。"
+                )
+            selected_relations = [
+                selected_release["component_releases"][component].get(
+                    "relation"
+                )
+                for component in requested_components
+            ]
+            if selected_relations and all(
+                relation == "current" for relation in selected_relations
+            ):
+                warnings.append(
+                    "所选组件已经是该发行版版本；本次会重新写入文件，"
+                    "可用于修复本地文件或获取同一版本内更新的构建。"
+                )
             if selected_release.get("prerelease"):
                 warnings.append(
                     "这是 GitHub Pre-release 版本，极不稳定，可能包含未完成的接口或数据迁移；"
                     "请先备份数据，并接受它可能无法回滚。"
                 )
-            if self.frontend == "gui":
-                warnings.append(
-                    "GUI 前端代码更新后需要完全退出并重新打开应用，仅重启后端不会加载新界面。"
-                )
-            else:
-                warnings.append("WebUI 前端更新后需要刷新浏览器页面。")
+            if frontend_component in requested_components:
+                if self.frontend == "gui":
+                    warnings.append(
+                        "GUI 前端代码更新后需要完全退出并重新打开应用，仅重启后端不会加载新界面。"
+                    )
+                else:
+                    warnings.append(
+                        "WebUI 前端更新后需要刷新浏览器页面。"
+                    )
         if selected_release is not None:
             token = secrets.token_urlsafe(32)
             self._plan = {
@@ -1429,24 +1495,50 @@ class ModuleUpdateService:
                 "distribution": True,
                 "release_tag": selected_release["release_tag"],
                 "prerelease": bool(selected_release.get("prerelease")),
-                "components": selected_release.get("components") or {},
+                "components": list(requested_components),
                 "warnings": warnings,
             }
         else:
             token = ""
             self._plan = None
-        component_updates = (
+        all_component_updates = (
             list(selected_release["component_releases"].values())
             if selected_release is not None
             else []
         )
-        distribution_updates = (
-            [selected_release] if selected_release is not None else []
-        )
+        component_updates = [
+            selected_release["component_releases"][component]
+            for component in requested_components
+        ] if selected_release is not None else []
+        distribution_updates: list[dict[str, Any]] = []
+        if selected_release is not None:
+            distribution_update = dict(selected_release)
+            distribution_update["selected_components"] = list(
+                requested_components
+            )
+            distribution_updates.append(distribution_update)
         target_name = (
             str(selected_release.get("name") or selected_release["release_tag"])
             if selected_release is not None
             else ""
+        )
+        if selected_release is not None and len(requested_components) == 1:
+            target_name += (
+                "（仅" + MODULE_LABELS[requested_components[0]] + "）"
+            )
+        target_relation = (
+            selected_release["component_releases"][
+                requested_components[0]
+            ].get("relation")
+            if (
+                selected_release is not None
+                and len(requested_components) == 1
+            )
+            else (
+                selected_release.get("relation")
+                if selected_release is not None
+                else ""
+            )
         )
         result = {
             "mode": "module",
@@ -1464,11 +1556,8 @@ class ModuleUpdateService:
             "target_sha": "",
             "target_label": target_name,
             "target_ref": "distribution-releases",
-            "target_relation": (
-                selected_release.get("relation")
-                if selected_release is not None
-                else ""
-            ),
+            "target_relation": target_relation,
+            "selected_components": list(requested_components),
             "confirmation_token": token,
             "is_rollback": False,
             "is_diverged": False,
@@ -1502,7 +1591,7 @@ class ModuleUpdateService:
         ]
         stable_components = [
             self._public_summary(item)
-            for item in component_updates
+            for item in all_component_updates
             if not item.get("prerelease")
         ]
         state.update(
@@ -1583,6 +1672,8 @@ class ModuleUpdateService:
             "frontend_updated": result["frontend_updated"],
             "distribution_updated": result.get("distribution_updated", False),
             "distribution_tag": result.get("distribution_tag", ""),
+            "selected_components": result.get("selected_components") or [],
+            "updated_components": result.get("updated_components") or [],
             "partial": False,
             "skipped_components": [],
             "local_changes": result.get("local_changes") or {},
@@ -1647,7 +1738,16 @@ class ModuleUpdateService:
             raise ModuleUpdateError("release_invalid", "发行版 tag 不合法")
         release, components = self._load_distribution_release(release_tag)
         frontend_component = FRONTEND_COMPONENT[self.frontend]
-        wanted = ["backend", frontend_component]
+        allowed = ("backend", frontend_component)
+        wanted = [
+            component
+            for component in (plan.get("components") or [])
+            if component in allowed
+        ]
+        if not wanted:
+            raise ModuleUpdateError(
+                "invalid_component", "没有选择要更新的组件"
+            )
         timestamp = (
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             + "-"
@@ -1718,7 +1818,7 @@ class ModuleUpdateService:
             if set(staged) != set(wanted):
                 raise ModuleUpdateError(
                     "module_asset_missing",
-                    "发行版没有同时提供后端与当前前端",
+                    "发行版没有提供所选组件",
                 )
 
             component_stats: dict[str, dict[str, Any]] = {}
@@ -1845,6 +1945,10 @@ class ModuleUpdateService:
             ),
             "distribution_updated": bool(applied),
             "distribution_tag": release_tag,
+            "selected_components": list(wanted),
+            "updated_components": [
+                item["component"] for item in applied
+            ],
             "partial": False,
             "skipped_components": [],
             "local_changes": {

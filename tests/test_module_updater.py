@@ -863,3 +863,139 @@ def test_api_builds_module_service_from_frontend(workspace):
     assert isinstance(service, ModuleUpdateService)
     assert build_module_service(host) is service
     assert build_service(host) is service
+
+
+def test_frontend_only_update_skips_backend(workspace):
+    root, _data = workspace
+    fake = FakeGitHub()
+    fake.add_release(
+        "v0.0.2",
+        backend={
+            "VERSION": "0.0.2\n",
+            "backend/__init__.py": "new backend\n",
+        },
+        gui={
+            "VERSION": "0.0.2\n",
+            "gui/__init__.py": "new gui\n",
+        },
+        published="2026-11-13T00:00:00Z",
+    )
+    service = _service(workspace, fake)
+    checked = asyncio.run(
+        service.check("distribution:v0.0.2", components=["gui"])
+    )
+    assert checked["selected_components"] == ["gui"]
+    assert [item["component"] for item in checked["updates"]] == ["gui"]
+    assert checked["target_relation"] == "newer"
+
+    result = asyncio.run(
+        service.apply(confirmation_token=checked["confirmation_token"])
+    )
+    assert result["selected_components"] == ["gui"]
+    assert result["updated_components"] == ["gui"]
+    assert result["backend_updated"] is False
+    assert result["frontend_updated"] is True
+    assert result["restart_required"] is False
+    assert result["requires_app_restart"] is True
+    assert (root / "backend" / "__init__.py").read_text(
+        encoding="utf-8"
+    ) == "old backend\n"
+    assert (root / "gui" / "__init__.py").read_text(
+        encoding="utf-8"
+    ) == "new gui\n"
+    manifest = json.loads((root / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert manifest["components"]["backend"]["tag"] == "v0.0.1-dev"
+    assert manifest["components"]["gui"]["tag"] == "v0.0.2"
+
+
+def test_backend_only_update_skips_frontend(workspace):
+    root, _data = workspace
+    fake = FakeGitHub()
+    fake.add_release(
+        "v0.0.2",
+        backend={
+            "VERSION": "0.0.2\n",
+            "backend/__init__.py": "new backend\n",
+        },
+        gui={
+            "VERSION": "0.0.2\n",
+            "gui/__init__.py": "new gui\n",
+        },
+        published="2026-11-13T00:00:00Z",
+    )
+    service = _service(workspace, fake)
+    checked = asyncio.run(
+        service.check("distribution:v0.0.2", components=["backend"])
+    )
+    assert checked["selected_components"] == ["backend"]
+    assert [item["component"] for item in checked["updates"]] == [
+        "backend"
+    ]
+
+    result = asyncio.run(
+        service.apply(confirmation_token=checked["confirmation_token"])
+    )
+    assert result["backend_updated"] is True
+    assert result["frontend_updated"] is False
+    assert result["restart_required"] is True
+    assert result["requires_app_restart"] is False
+    assert (root / "backend" / "__init__.py").read_text(
+        encoding="utf-8"
+    ) == "new backend\n"
+    assert (root / "gui" / "app.py").read_text(
+        encoding="utf-8"
+    ) == "old gui\n"
+    assert not (root / "gui" / "__init__.py").exists()
+
+
+def test_frontend_only_can_reapply_same_release_asset(workspace):
+    root, _data = workspace
+    fake = FakeGitHub()
+    fake.add_release(
+        "v0.0.2",
+        gui={
+            "VERSION": "0.0.2\n",
+            "gui/__init__.py": "first build\n",
+        },
+        published="2026-11-13T00:00:00Z",
+    )
+    service = _service(workspace, fake)
+    full = asyncio.run(service.check("distribution:v0.0.2"))
+    asyncio.run(service.apply(confirmation_token=full["confirmation_token"]))
+    assert (root / "gui" / "__init__.py").read_text(
+        encoding="utf-8"
+    ) == "first build\n"
+
+    fake.releases_by_repo[DISTRIBUTION_REPO].clear()
+    fake.add_release(
+        "v0.0.2",
+        gui={
+            "VERSION": "0.0.2\n",
+            "gui/__init__.py": "hotfix build\n",
+        },
+        published="2026-11-14T00:00:00Z",
+    )
+    checked = asyncio.run(
+        service.check("distribution:v0.0.2", components=["gui"])
+    )
+    assert checked["can_apply"] is True
+    assert checked["target_relation"] == "current"
+    assert any("重新写入" in warning for warning in checked["warnings"])
+    result = asyncio.run(
+        service.apply(confirmation_token=checked["confirmation_token"])
+    )
+    assert result["backend_updated"] is False
+    assert result["frontend_updated"] is True
+    assert (root / "gui" / "__init__.py").read_text(
+        encoding="utf-8"
+    ) == "hotfix build\n"
+
+
+def test_check_rejects_invalid_component(workspace):
+    _root, _data = workspace
+    fake = FakeGitHub()
+    fake.add_release("v0.0.2")
+    service = _service(workspace, fake)
+    with pytest.raises(ModuleUpdateError) as excinfo:
+        asyncio.run(service.check("v0.0.2", components=["other"]))
+    assert excinfo.value.code == "invalid_component"

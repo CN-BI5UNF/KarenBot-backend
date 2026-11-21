@@ -38,6 +38,7 @@ router = APIRouter(prefix="/api/update", tags=["update"])
 
 class UpdateCheckPayload(BaseModel):
     target_tag: str | None = Field(default=None, max_length=200)
+    components: list[str] | None = Field(default=None, max_length=2)
 
     @field_validator("target_tag")
     @classmethod
@@ -199,6 +200,7 @@ def _http_error(exc: UpdateError | ModuleUpdateError) -> HTTPException:
             "github_auth_required",
             "github_repo_unavailable",
             "release_invalid",
+            "invalid_component",
             "module_manifest_invalid",
             "module_asset_missing",
             "module_checksum_mismatch",
@@ -208,6 +210,7 @@ def _http_error(exc: UpdateError | ModuleUpdateError) -> HTTPException:
         }:
             status = 400 if exc.code in {
                 "release_invalid",
+                "invalid_component",
                 "module_manifest_invalid",
                 "module_asset_missing",
                 "module_checksum_mismatch",
@@ -311,8 +314,11 @@ async def check(
     payload: Annotated[UpdateCheckPayload | None, Body()] = None,
 ) -> dict[str, Any]:
     target_tag = payload.target_tag if payload else None
+    components = payload.components if payload else None
     try:
-        return await _service(request).check(target_tag=target_tag)
+        return await _service(request).check(
+            target_tag=target_tag, components=components
+        )
     except (UpdateError, ModuleUpdateError) as exc:
         raise _http_error(exc) from exc
 

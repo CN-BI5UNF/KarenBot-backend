@@ -256,7 +256,7 @@ GUI 的「设置 → 更新」优先读取 `CN-BI5UNF/KarenBot` 的统一发行�
 | `KarenBot-GUI-<tag>.tar.gz` | `gui/` |
 | `KarenBot-WebUI-<tag>.tar.gz` | `webui/` |
 
-每次更新都会同时写后端与当前前端，不能只更新一个组件。后端包按白名单叠加到应用根目录，前端只更新 `gui/` 或 `webui/`。`data/`、`personas/`、`plugins/`、`config.yaml` 等用户数据不会被覆盖，更新也不会删除文件。每个被替换的旧文件都会先备份到数据目录的 `module_backups/<时间戳>/`。
+默认同时更新后端与当前前端；也可以在版本卡片上只选择后端或只选择当前前端。单组件更新只写入所选组件，未选组件保持原版本，两端版本可能不一致。后端包按白名单叠加到应用根目录，前端只更新 `gui/` 或 `webui/`。`data/`、`personas/`、`plugins/`、`config.yaml` 等用户数据不会被覆盖，更新也不会删除文件。每个被替换的旧文件都会先备份到数据目录的 `module_backups/<时间戳>/`。
 
 ### Latest 与 Pre-release
 

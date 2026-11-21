@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.0.0-alpha.1 — 2026-11-21
+
+修复统一发行版只能整体更新、WebUI 无法单独更新前端的问题。
+
+- `POST /api/update/check` 新增可选 `components` 数组，支持 `backend` 和当前前端（`gui` 或 `webui`）。
+- 不传 `components` 时仍默认同时更新后端与当前前端；单独选择时允许只更新一个组件，并提示两端版本可能不一致。
+- 允许对当前版本重新应用所选组件（用于热修复/刷新资产）；只选前端时不会重启后端。
+- `module_updater` 只下载、校验、写入所选组件，未选组件的文件保持原样；返回 `selected_components`、`updated_components`。
+- 更新计划与状态中的 `updates` 仍保留全部组件信息，避免另一个前端版本显示丢失。
+
 ## v2.0.0-alpha — 2026-11-21
 
 KarenBot 统一发行版首个 v2 alpha。后端、GUI、WebUI 版本统一为 `v2.0.0-alpha`，正式安装/更新入口为 `CN-BI5UNF/KarenBot` 主仓库。
