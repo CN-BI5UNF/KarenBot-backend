@@ -26,12 +26,18 @@
   `stable_seq`、`tombstone_read_barrier`、`asset_epoch`。
 - `optional_features`：仅供展示/审计的能力。
 
-当前基线（2026-11-17）：
+当前基线（2026-11-21）：
 
 ```text
-root_config=2, persona_db=2 (min_local=1), maintenance=1, rag=0, projection=0
+root_config=3 (min_local=2), persona_db=2 (min_local=1), maintenance=1, rag=0, projection=0
 data_contract_epoch=0
 ```
+
+`root_config` v2→v3 由 `load_config` 在启动时自动迁移（旧 NapCat 进程托管
+转成 `programs` 条目），因此 `min_local_version=2` 允许现有 v2 配置先通过
+门禁；v1 配置仍要求先完成升级。旧 trusted launcher 不识别
+`min_local_version` 时会按严格相等处理并 fail-closed，受管部署需要同步更新
+launcher。
 
 karen.db v1→v2 由 Runtime 首次访问时自动迁移，因此 `persona_db` 用
 `min_local_version=1` 允许 v1 启动；旧代码（manifest 仍为 persona_db=1）

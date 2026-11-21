@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 
+from adapters.outbound import action_to_segments
 from adapters.types import Target
 from utils import get_time
 
@@ -130,41 +130,46 @@ def _normalize_send_delay(model_delay: float) -> float:
     return float(model_delay)
 
 
+def _thread_id_for_target(
+    ctx: ToolContext, scope: str, target_id: str
+) -> str:
+    """只有发给当前会话本身时才沿用 topic thread_id。
+
+    从 Telegram Topic 里给另一个群/用户发消息时，旧 thread_id 会导致
+    “message thread not found”，必须留空。
+    """
+    if scope != "group":
+        return ""
+    target = ctx.extras.get("default_reply_target")
+    if isinstance(target, dict) and str(target.get("target_id")) == str(target_id):
+        return str(target.get("thread_id") or "")
+    return ""
+
+
+def _self_id_from_ctx(ctx: ToolContext) -> str:
+    target = ctx.extras.get("default_reply_target")
+    if isinstance(target, dict) and target.get("self_id"):
+        return str(target["self_id"])
+    return str(ctx.extras.get("self_id") or "")
+
+
 def _apply_reply_to_first_text(actions: list[dict], reply_to_message_id: str | None) -> None:
     reply_to = str(reply_to_message_id or "").strip()
     if not reply_to:
         return
-    prefix = f"[CQ:reply,id={reply_to}]"
     for action in actions:
-        if action.get("kind", "text") != "text":
+        if action.get("kind", "text") == "voice":
             continue
-        content = str(action.get("content") or "")
-        if content.startswith("[CQ:reply,"):
+        if action.get("reply_to"):
             return
-        action["content"] = f"{prefix}{content}"
-        action["label"] = str(action.get("label") or content)
+        action["reply_to"] = reply_to
         return
 
 
 async def _send_action_direct(ctx: ToolContext, target: Target, action: dict) -> str | None:
-    kind = str(action.get("kind") or "text")
-    if kind in {"emoji", "image"}:
-        return await ctx.adapter.send_image(  # type: ignore[union-attr]
-            target,
-            image_path=(
-                Path(str(action.get("image_path")))
-                if action.get("image_path")
-                else None
-            ),
-            image_url=str(action.get("image_url") or "") or None,
-        )
-    if kind == "face":
-        face_id = str(action.get("face_id") or "")
-        content = str(action.get("content") or "")
-        if not content and face_id:
-            content = f"[CQ:face,id={face_id}]"
-        return await ctx.adapter.send_text(target, content)  # type: ignore[union-attr]
-    return await ctx.adapter.send_text(target, str(action.get("content") or ""))  # type: ignore[union-attr]
+    return await ctx.adapter.send_message(  # type: ignore[union-attr]
+        target, action_to_segments(action)
+    )
 
 
 # ============================================================
@@ -175,9 +180,9 @@ async def _send_action_direct(ctx: ToolContext, target: Target, action: dict) ->
 @tool(
     name="send_private_messages",
     description=(
-        "向 QQ 用户发送私聊消息。可混合文字/表情包/图片/QQ 原生表情，按 order 排序，delay 控制间隔。"
+        "向用户发送私聊消息（QQ / Telegram 等）。可混合文字/表情包/图片/QQ 原生表情，按 order 排序，delay 控制间隔。"
         "原生表情用 face 字段按中文名（如“流泪”“笑哭”）发送。"
-        "可在 content 开头加 [CQ:reply,id=消息ID] 引用回复。"
+        "需要引用回复时填 reply_to_message_id；需要 @ 某人时用 mentions 字段。"
         "发送后如本轮已结束，继续调用 no_action 收尾。"
     ),
     args_model=SendPrivateArgs,
@@ -225,6 +230,13 @@ async def send_private_messages(args: SendPrivateArgs, ctx: ToolContext) -> dict
                 "target_scope": "private",
                 "target_id": str(t.target_qq),
                 "delay": delay,
+                "mentions": [
+                    str(item).strip()
+                    for item in getattr(t, "mentions", [])
+                    if str(item).strip()
+                ],
+                "thread_id": _thread_id_for_target(ctx, "private", str(t.target_qq)),
+                "self_id": _self_id_from_ctx(ctx),
                 "interrupt_policy": args.delivery_interrupt_policy,
                 **message_action,
             }
@@ -254,6 +266,8 @@ async def send_private_messages(args: SendPrivateArgs, ctx: ToolContext) -> dict
             adapter=ctx.adapter.name,
             scope="private",
             target_id=str(action["target_id"]),
+            thread_id=str(action.get("thread_id") or "") or None,
+            self_id=str(action.get("self_id") or "") or None,
         )
         try:
             msg_id = await _send_action_direct(ctx, target, action)
@@ -293,9 +307,9 @@ async def send_private_messages(args: SendPrivateArgs, ctx: ToolContext) -> dict
 @tool(
     name="send_group_message",
     description=(
-        "向 QQ 群发送消息。可混合文字/表情包/图片/QQ 原生表情，按 order 排序，delay 控制间隔。"
+        "向群聊发送消息（QQ / Telegram 等）。可混合文字/表情包/图片/QQ 原生表情，按 order 排序，delay 控制间隔。"
         "原生表情用 face 字段按中文名（如“流泪”“笑哭”）发送。"
-        "可在 content 开头加 [CQ:reply,id=msg_id] 引用；@人用 [CQ:at,qq=QQ号]。"
+        "需要引用回复时填 reply_to_message_id；需要 @ 某人时用每条消息的 mentions 字段。"
         "发送后如本轮已结束，继续调用 no_action 收尾。"
     ),
     args_model=SendGroupArgs,
@@ -338,6 +352,13 @@ async def send_group_message(args: SendGroupArgs, ctx: ToolContext) -> dict:
                 "target_scope": "group",
                 "target_id": str(args.group_id),
                 "delay": delay,
+                "mentions": [
+                    str(item).strip()
+                    for item in getattr(t, "mentions", [])
+                    if str(item).strip()
+                ],
+                "thread_id": _thread_id_for_target(ctx, "group", str(args.group_id)),
+                "self_id": _self_id_from_ctx(ctx),
                 "interrupt_policy": args.delivery_interrupt_policy,
                 **message_action,
             }
@@ -367,6 +388,8 @@ async def send_group_message(args: SendGroupArgs, ctx: ToolContext) -> dict:
             adapter=ctx.adapter.name,
             scope="group",
             target_id=str(action["target_id"]),
+            thread_id=str(action.get("thread_id") or "") or None,
+            self_id=str(action.get("self_id") or "") or None,
         )
         try:
             msg_id = await _send_action_direct(ctx, target, action)
@@ -441,6 +464,7 @@ async def commit_send_attempt(args: CommitSendAttemptArgs, ctx: ToolContext) -> 
     args_model=RecallMessageArgs,
     category="messaging",
     search_tags=["撤回", "消息", "recall", "撤销"],
+    required_capability="recall",
 )
 async def recall_message(args: RecallMessageArgs, ctx: ToolContext) -> dict:
     """直接调用 adapter.recall。"""
@@ -492,6 +516,7 @@ async def recall_message(args: RecallMessageArgs, ctx: ToolContext) -> dict:
             "file_path": "report.pdf",
         }
     ],
+    required_capability="upload_file",
 )
 async def upload_file(args: UploadFileArgs, ctx: ToolContext) -> dict:
     """通过 adapter.upload_file 上传。安全检查：file_path 必须在 workspace 下。"""

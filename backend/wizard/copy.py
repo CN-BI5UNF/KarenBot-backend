@@ -185,13 +185,6 @@ COPY: dict[str, str] = {
     "adapter.ws_url_placeholder": "ws://127.0.0.1:6199",
     "adapter.token_label": "鉴权 Token（可选）",
     "adapter.token_hint": "NapCat 配置里设了 token 才需要填。",
-    "adapter.manage_process_label": "由 Karen 托管 NapCat 进程",
-    "adapter.manage_process_hint": (
-        "打开后，启动 Karen 时自动拉起 NapCat，退出时自动关闭。\n"
-        "需要填 NapCat 启动脚本或可执行文件路径（.bat / .cmd / .exe），不要带引号。\n"
-        "如果 NapCat 已经由系统或手动启动，请关闭托管；Karen 也会先探测端口，"
-        "已有服务响应时跳过拉起。"
-    ),
     "adapter.whitelist_title": "谁能跟 Karen 说话",
     "adapter.whitelist_mode_verify": "管理员审核",
     "adapter.whitelist_mode_verify_desc": "陌生人加好友 / 加群时，由你确认。当前默认。",

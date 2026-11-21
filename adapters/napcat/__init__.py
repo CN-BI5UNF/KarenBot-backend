@@ -1,34 +1,22 @@
-"""NapCat（OneBot V11 实现）适配器。
+"""NapCat 兼容层（已迁移到 ``adapters.onebot11``）。
 
-模块组成：
-    connection.py  —— WebSocket 连接（反向/正向 WS）
-    events.py      —— NapCat JSON → 统一事件类型
-    api_call.py    —— API 调用（echo 配对）
-    process.py     —— 可选的 NapCat 进程托管
-    adapter.py     —— IAdapter 实现（NapCatAdapter）
-
-导入本模块时自动把 'napcat' 注册到全局适配器类型注册表，
-后续可通过 build_adapter(name, type_name='napcat', ...) 构造实例。
+保留旧 import 路径 1-2 个版本：
+    from adapters.napcat.adapter import NapCatAdapter
+    from adapters.napcat.connection import ReverseWSConnection
 """
 
 from __future__ import annotations
 
-from adapters.registry import known_adapter_types, register_adapter_type
-
-from .adapter import NapCatAdapter
-from .api_call import NapCatApiCaller
-from .connection import (
+# 触发 onebot11 的类型注册
+import adapters.onebot11  # noqa: F401
+from adapters.onebot11 import (
     ForwardWSConnection,
+    NapCatAdapter,
+    NapCatApiCaller,
     NapCatConnection,
     ReverseWSConnection,
+    parse_napcat_event,
 )
-from .events import parse_napcat_event
-from .process import NapCatProcessManager
-
-# 注册类型（幂等）
-if "napcat" not in known_adapter_types():
-    register_adapter_type("napcat", NapCatAdapter.from_config)
-
 
 __all__ = [
     "NapCatAdapter",
@@ -36,6 +24,5 @@ __all__ = [
     "NapCatConnection",
     "ReverseWSConnection",
     "ForwardWSConnection",
-    "NapCatProcessManager",
     "parse_napcat_event",
 ]

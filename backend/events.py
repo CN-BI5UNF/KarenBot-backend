@@ -22,6 +22,21 @@ logger = logging.getLogger(__name__)
 STATUS_POLL_SECONDS = 2.0
 
 
+def status_fingerprint(status: dict[str, Any]) -> str:
+    """Stable fingerprint including external-program state/failures."""
+    programs = status.get("programs") or []
+    program_sig = ";".join(
+        f"{item.get('id')}:{item.get('state')}:"
+        f"{item.get('failure_seq')}:{item.get('pid')}"
+        for item in programs
+        if isinstance(item, dict)
+    )
+    return (
+        f"{status.get('state')}|{status.get('adapter_connected')}|"
+        f"{status.get('persona')}|{status.get('last_error')}|{program_sig}"
+    )
+
+
 class EventHub:
     """单个 WebSocket 连接的订阅集合。"""
 
@@ -84,6 +99,12 @@ class EventHub:
 
     def register(self, queue: asyncio.Queue) -> None:
         self._clients.add(queue)
+        # 新连接/重连先拿一份完整快照：状态循环只在变化时广播，若失败发生
+        # 在客户端离线期间，重连后不能永远看不到提醒。
+        try:
+            queue.put_nowait({"type": "status", "data": self.host.status()})
+        except Exception:  # noqa: BLE001 - snapshot is best-effort
+            pass
 
     def unregister(self, queue: asyncio.Queue) -> None:
         self._clients.discard(queue)
@@ -121,10 +142,7 @@ class EventHub:
             try:
                 await asyncio.sleep(STATUS_POLL_SECONDS)
                 status = self.host.status()
-                fingerprint = (
-                    f"{status.get('state')}|{status.get('adapter_connected')}|"
-                    f"{status.get('persona')}|{status.get('last_error')}"
-                )
+                fingerprint = status_fingerprint(status)
                 if fingerprint == self._last_status:
                     continue
                 self._last_status = fingerprint

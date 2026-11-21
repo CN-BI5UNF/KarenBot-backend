@@ -345,6 +345,14 @@ class ToolSpec:
     examples: list[dict[str, Any]] = field(default_factory=list)
     """tool_search 返回的调用示例。"""
 
+    required_capability: str | None = None
+    """调用该工具所需的适配器能力名；None 表示所有适配器可用。
+
+    例：send_poke -> "poke"、set_group_ban -> "group_admin"。
+    build_default_registry 会按当前适配器的 AdapterCapabilities 过滤掉不支持的工具，
+    避免模型反复调用一个协议端根本不存在的动作。
+    """
+
     concurrency_safe: bool = False
     """只读、无共享副作用的工具可标记为 True。
 
@@ -488,6 +496,7 @@ def tool(
     risk_level: Literal["low", "medium", "high"] = "low",
     examples: list[dict[str, Any]] | None = None,
     concurrency_safe: bool = False,
+    required_capability: str | None = None,
 ) -> Callable[[ToolFunc], ToolFunc]:
     """把函数注册成工具的装饰器。
 
@@ -522,6 +531,7 @@ def tool(
             risk_level=risk_level,
             examples=list(examples or []),
             concurrency_safe=concurrency_safe,
+            required_capability=required_capability,
             toolsets=list(toolsets_for_tool(name)),
         )
         _DEFAULT_REGISTRY.append(spec)

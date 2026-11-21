@@ -224,6 +224,152 @@ def _migrate_v1_to_v2(config: dict[str, Any], report: _ReportBuilder) -> None:
     _ = config, report
 
 
+_LEGACY_PROCESS_KEYS = (
+    "manage_process",
+    "process_path",
+    "process_args",
+    "auto_restart",
+    "process_warmup_seconds",
+)
+
+
+def _program_id_slug(value: str) -> str:
+    slug = "".join(
+        char.lower() if char.isalnum() else "_" for char in str(value)
+    ).strip("_")
+    return slug or "default"
+
+
+def _unique_program_id(base: str, existing: dict[str, Any]) -> str:
+    if base not in existing:
+        return base
+    index = 2
+    while f"{base}_{index}" in existing:
+        index += 1
+    return f"{base}_{index}"
+
+
+def _clean_executable(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    while len(text) >= 2 and (
+        (text[0] == text[-1] and text[0] in {'"', "'"})
+        or (text[0] in {"“", "‘"} and text[-1] in {"”", "’"})
+    ):
+        text = text[1:-1].strip()
+    return text
+
+
+def _clamp_wait(value: Any) -> float:
+    try:
+        wait = float(value)
+    except (TypeError, ValueError):
+        return 2.0
+    return min(300.0, max(0.0, wait))
+
+
+@CONFIG_MIGRATION_REGISTRY.register(2, 3)
+def _migrate_v2_to_v3(config: dict[str, Any], report: _ReportBuilder) -> None:
+    """把旧的 NapCat 专用进程托管迁移为通用外部程序列表。
+
+    旧字段只在 v2 存在；迁移后从 adapter 删除，程序列表成为唯一入口。
+    `auto_restart` 在旧 schema 里只被进程托管消费，因此一并迁移到程序的
+    `auto_restart`。
+    """
+    adapters = config.get("adapters")
+    if not isinstance(adapters, dict):
+        return
+
+    raw_programs = config.get("programs")
+    programs: dict[str, Any] = (
+        dict(raw_programs) if isinstance(raw_programs, dict) else {}
+    )
+
+    for adapter_id, adapter in list(adapters.items()):
+        if not isinstance(adapter, dict):
+            report.warn(f"adapters.{adapter_id} 不是对象，跳过进程托管迁移。")
+            continue
+
+        adapter_type = str(adapter.get("type") or "napcat")
+        managed = bool(adapter.get("manage_process"))
+        executable = _clean_executable(adapter.get("process_path"))
+
+        if managed and adapter_type in {"napcat", "onebot11"}:
+            if executable:
+                program_id = _unique_program_id(
+                    f"napcat_{_program_id_slug(str(adapter_id))}", programs
+                )
+                transport = str(
+                    adapter.get("transport")
+                    or (
+                        "ws_server"
+                        if str(adapter.get("mode") or "").lower() == "server"
+                        else "ws_client"
+                    )
+                )
+                args_raw = adapter.get("process_args")
+                args = (
+                    [str(item) for item in args_raw]
+                    if isinstance(args_raw, list)
+                    else []
+                )
+                probe_host = "127.0.0.1"
+                probe_port = 0
+                if transport == "ws_client":
+                    probe_host = str(adapter.get("host") or "127.0.0.1")
+                    if probe_host in {"0.0.0.0", "::", "[::]"}:
+                        probe_host = "127.0.0.1"
+                    try:
+                        probe_port = int(adapter.get("port") or 0)
+                    except (TypeError, ValueError):
+                        probe_port = 0
+                    probe_port = max(0, min(65535, probe_port))
+                programs[program_id] = {
+                    "name": (
+                        "NapCatQQ"
+                        if str(adapter_id) == "default"
+                        else f"NapCatQQ ({adapter_id})"
+                    ),
+                    "enabled": bool(adapter.get("enabled", True)),
+                    "executable": executable,
+                    "args": args,
+                    "cwd": "",
+                    "env": {},
+                    "stop_with_karen": True,
+                    "probe_host": probe_host,
+                    "probe_port": probe_port,
+                    "auto_restart": bool(adapter.get("auto_restart", True)),
+                    "startup_wait_seconds": _clamp_wait(
+                        adapter.get("process_warmup_seconds", 2.0)
+                    ),
+                }
+                report.add_rename(
+                    f"adapters.{adapter_id}.manage_process",
+                    f"programs.{program_id}",
+                    "renamed",
+                )
+                report.warn(
+                    f"adapters.{adapter_id} 的进程托管已迁移为 "
+                    f"programs.{program_id}；请在设置 → 外部程序中确认名称和关闭行为。"
+                )
+            else:
+                report.warn(
+                    f"adapters.{adapter_id} 勾选了进程托管但没有进程路径；"
+                    "旧托管字段已删除，未生成外部程序。"
+                )
+
+        for key in _LEGACY_PROCESS_KEYS:
+            if key in adapter:
+                adapter.pop(key)
+                report.add_rename(
+                    f"adapters.{adapter_id}.{key}", "", "removed"
+                )
+
+    if programs:
+        config["programs"] = programs
+
+
 def _normalize_phase_45_legacy_keys(config: dict[str, Any], report: _ReportBuilder) -> None:
     _rename_known_behavior_paths(config, report)
     _rename_provider_timeout(config, report)

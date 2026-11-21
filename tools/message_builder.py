@@ -315,7 +315,7 @@ def build_message_action(
         return {
             "kind": "face",
             "face_id": face_id,
-            "content": f"[CQ:face,id={face_id}]",
+            "content": "",
             "label": f"[{name}]",
         }
     raise MessageBuildError("内容为空")

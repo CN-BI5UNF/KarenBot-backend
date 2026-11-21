@@ -36,10 +36,10 @@ class _ToolArgs(BaseModel):
 class PrivateMessageTarget(_ToolArgs):
     """私聊消息中的单条目标项。"""
 
-    target_qq: int = Field(..., description="接收者 QQ 号")
+    target_qq: str = Field(..., description="接收者用户 ID：QQ 号，或 Telegram 等平台的用户 ID")
     content: str | None = Field(
         default=None,
-        description="文本正文，可含 [CQ:reply,id=...] 或 [CQ:at,qq=...]；与 emoji/image/face 四选一。",
+        description="文本正文（纯文本）；需要引用用 reply_to_message_id，需要 @ 人用 mentions；与 emoji/image/face 四选一。",
     )
     emoji: str | None = Field(
         default=None,
@@ -51,7 +51,11 @@ class PrivateMessageTarget(_ToolArgs):
     )
     face: str | None = Field(
         default=None,
-        description="QQ 原生表情名或 ID（如“流泪”“笑哭”）；与 content/emoji/image 四选一。",
+        description="原生表情名或 ID（QQ 用中文名/ID；其他平台不支持时会按文本占位发送）；与 content/emoji/image 四选一。",
+    )
+    mentions: list[str] = Field(
+        default_factory=list,
+        description="可选：要 @ 的用户 ID 列表。程序会把这些用户放在正文前；不要手写 CQ 码。",
     )
     order: int = Field(..., description="发送顺序，从 1 开始升序")
     delay: float = Field(
@@ -136,7 +140,7 @@ class GroupMessageTarget(_ToolArgs):
 
     content: str | None = Field(
         default=None,
-        description="文本正文，可含 [CQ:reply,id=...] 或 [CQ:at,qq=...]；与 emoji/image/face 四选一。",
+        description="文本正文（纯文本）；需要引用用 reply_to_message_id，需要 @ 人用 mentions；与 emoji/image/face 四选一。",
     )
     emoji: str | None = Field(
         default=None,
@@ -148,7 +152,11 @@ class GroupMessageTarget(_ToolArgs):
     )
     face: str | None = Field(
         default=None,
-        description="QQ 原生表情名或 ID（如“流泪”“笑哭”）；与 content/emoji/image 四选一。",
+        description="原生表情名或 ID（QQ 用中文名/ID；其他平台不支持时会按文本占位发送）；与 content/emoji/image 四选一。",
+    )
+    mentions: list[str] = Field(
+        default_factory=list,
+        description="可选：要 @ 的用户 ID 列表。程序会把这些用户放在正文前；不要手写 CQ 码。",
     )
     order: int = Field(..., description="发送顺序，从 1 开始升序")
     delay: float = Field(
@@ -173,7 +181,7 @@ class GroupMessageTarget(_ToolArgs):
 class SendGroupArgs(_ToolArgs):
     """send_group_message 工具参数。"""
 
-    group_id: int = Field(..., description="群号")
+    group_id: str = Field(..., description="群号")
     targets: list[GroupMessageTarget] = Field(
         ..., min_length=1, description="要发送的消息列表，至少 1 项"
     )
@@ -221,7 +229,7 @@ class SendGroupArgs(_ToolArgs):
     reply_to_message_id: str | None = Field(
         default=None,
         description=(
-            "可选：要引用回复的真实 msg_id；程序会在第一条文本前补 CQ 引用。"
+            "可选：要引用回复的真实 msg_id；程序会在第一条文本/表情前加结构化引用。"
             "延迟回复、接旧话、回复非最新消息、多人插话或短确认可能看不出回谁时优先填写；"
             "没有可靠 ID 不要编造。"
         ),
@@ -275,7 +283,7 @@ class CommitSendAttemptArgs(_ToolArgs):
 class RecallMessageArgs(_ToolArgs):
     """recall_message 工具参数。"""
 
-    message_id: int = Field(
+    message_id: str = Field(
         ..., description="要撤回的消息 ID。仅可撤回 2 分钟内发出的消息。"
     )
 
@@ -302,20 +310,20 @@ class UploadFileArgs(_ToolArgs):
 class GetMsgArgs(_ToolArgs):
     """get_msg 工具参数。"""
 
-    message_id: int = Field(
+    message_id: str = Field(
         ...,
-        description="要读取的 QQ 消息 ID。只能使用上下文中真实出现过的 msg_id，不要猜。",
+        description="要读取的消息 ID。只能使用上下文中真实出现过的 msg_id，不要猜。",
     )
 
 
 class SendPokeArgs(_ToolArgs):
     """send_poke 工具参数。"""
 
-    user_id: int = Field(..., description="要戳一戳的目标 QQ 号，必须明确。")
-    group_id: int | None = Field(
+    user_id: str = Field(..., description="要戳一戳的目标用户 ID，必须明确。")
+    group_id: str | None = Field(
         default=None,
         description=(
-            "群号。群聊戳一戳时填写；私聊戳一戳不填。"
+            "群 ID。群聊戳一戳时填写；私聊戳一戳不填。"
             "不填且当前会话是群聊时，程序会自动使用当前群号。"
         ),
     )
@@ -328,7 +336,7 @@ class SendPokeArgs(_ToolArgs):
 class SetMsgEmojiLikeArgs(_ToolArgs):
     """set_msg_emoji_like 工具参数。"""
 
-    message_id: int = Field(
+    message_id: str = Field(
         ...,
         description="要添加或取消表情回复的消息 ID。必须是真实消息 ID，不要猜。",
     )
@@ -396,17 +404,17 @@ class ToolSearchArgs(_ToolArgs):
 class GetGroupSelfRoleArgs(_ToolArgs):
     """get_group_self_role 工具参数。"""
 
-    group_id: int | None = Field(
+    group_id: str | None = Field(
         default=None,
-        description="群号。不填时使用当前群聊；私聊或无法推断当前群时必须填写。",
+        description="群 ID。不填时使用当前群聊；私聊或无法推断当前群时必须填写。",
     )
 
 
 class SetGroupKickArgs(_ToolArgs):
     """set_group_kick 工具参数。"""
 
-    group_id: int = Field(..., description="群号")
-    user_id: int = Field(..., description="要踢出的 QQ 号，必须明确，不要猜")
+    group_id: str = Field(..., description="群 ID")
+    user_id: str = Field(..., description="要踢出的用户 ID，必须明确，不要猜")
     reject_add_request: bool = Field(
         default=False,
         description="是否拒绝该用户再次加群。默认 false；只有用户明确要求拉黑/拒绝再加时才设 true。",
@@ -421,8 +429,8 @@ class SetGroupKickArgs(_ToolArgs):
 class SetGroupBanArgs(_ToolArgs):
     """set_group_ban 工具参数。"""
 
-    group_id: int = Field(..., description="群号")
-    user_id: int = Field(..., description="要禁言的 QQ 号，必须明确，不要猜")
+    group_id: str = Field(..., description="群 ID")
+    user_id: str = Field(..., description="要禁言的用户 ID，必须明确，不要猜")
     duration_seconds: int = Field(
         ...,
         ge=1,
@@ -439,7 +447,7 @@ class SetGroupBanArgs(_ToolArgs):
 class SetGroupWholeBanArgs(_ToolArgs):
     """set_group_whole_ban 工具参数。"""
 
-    group_id: int = Field(..., description="群号")
+    group_id: str = Field(..., description="群 ID")
     enable: bool = Field(..., description="true=开启全员禁言，false=关闭全员禁言")
     reason: str = Field(
         ...,
@@ -451,9 +459,9 @@ class SetGroupWholeBanArgs(_ToolArgs):
 class SetGroupLeaveArgs(_ToolArgs):
     """set_group_leave 工具参数。"""
 
-    group_id: int | None = Field(
+    group_id: str | None = Field(
         default=None,
-        description="要退出的群号。不填时使用当前群聊；必须是当前群，不能让机器人跨群退群。",
+        description="要退出的群 ID。不填时使用当前群聊；必须是当前群，不能让机器人跨群退群。",
     )
     reason: str = Field(
         ...,
@@ -568,7 +576,7 @@ class ListContactsArgs(_ToolArgs):
             "当你不知道 QQ 号/群号或需要找联系人时使用。"
         ),
     )
-    group_id: int | None = Field(
+    group_id: str | None = Field(
         default=None, description="scope=group_members 时必填，填目标群号"
     )
     offset: int = Field(
@@ -593,7 +601,7 @@ class ListContactsArgs(_ToolArgs):
 class GetUserInfoArgs(_ToolArgs):
     """get_user_info 工具参数。"""
 
-    user_id: int = Field(..., description="目标用户的 QQ 号")
+    user_id: str = Field(..., description="目标用户的 QQ 号")
 
 
 class GetForwardMsgArgs(_ToolArgs):
@@ -679,7 +687,7 @@ class SetGroupRequestArgs(_ToolArgs):
 class SummarizeChatArgs(_ToolArgs):
     """summarize_chat_history 工具参数。"""
 
-    group_id: int = Field(..., description="要总结的群号")
+    group_id: str = Field(..., description="要总结的群号")
     custom_prompt: str | None = Field(
         default=None,
         description="自定义总结目标。不填会总结群成员概况、群聊基本信息、日常话题和成员印象。",

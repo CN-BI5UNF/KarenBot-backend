@@ -7,6 +7,8 @@ import logging
 import time
 from typing import Any
 
+from adapters.types import Target
+
 from .base import ToolContext, tool
 from .schemas import GetMsgArgs, SendPokeArgs, SetMsgEmojiLikeArgs
 
@@ -23,12 +25,13 @@ _POKE_COOLDOWN_SECONDS = 30.0
     args_model=GetMsgArgs,
     category="platform",
     search_tags=["消息", "详情", "msg", "message", "detail"],
+    required_capability="get_message",
 )
 async def get_msg(args: GetMsgArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
         return _failed("未连接适配器，无法读取消息。")
     try:
-        raw = await ctx.adapter.call_api("get_msg", message_id=int(args.message_id))
+        raw = await ctx.adapter.get_message(str(args.message_id))
     except Exception as e:
         logger.warning("get_msg 调用失败 message_id=%s: %s", args.message_id, e)
         return {
@@ -62,6 +65,7 @@ async def get_msg(args: GetMsgArgs, ctx: ToolContext) -> dict:
     category="platform",
     no_feedback=True,
     search_tags=["戳一戳", "拍一拍", "poke", "戳"],
+    required_capability="poke",
 )
 async def send_poke(args: SendPokeArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
@@ -76,11 +80,11 @@ async def send_poke(args: SendPokeArgs, ctx: ToolContext) -> dict:
             "error": "send_poke rate limited",
             "data": _poke_data(args, group_id),
         }
-    params: dict[str, Any] = {"user_id": int(args.user_id)}
-    if group_id is not None:
-        params["group_id"] = int(group_id)
+    target = _target_for(ctx, group_id, str(args.user_id))
+    params: dict[str, Any] = {"user_id": str(args.user_id), "group_id": group_id}
     try:
-        raw = await ctx.adapter.call_api("send_poke", **params)
+        await ctx.adapter.send_poke(target, str(args.user_id))
+        raw = {"ok": True}
     except Exception as e:
         logger.warning("send_poke 调用失败 params=%s: %s", params, e)
         return {
@@ -112,17 +116,25 @@ async def send_poke(args: SendPokeArgs, ctx: ToolContext) -> dict:
     category="platform",
     no_feedback=True,
     search_tags=["表情回应", "点赞", "reaction", "like", "emoji"],
+    required_capability="emoji_reaction",
 )
 async def set_msg_emoji_like(args: SetMsgEmojiLikeArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
         return _failed("未连接适配器，无法设置消息表情回复。")
     params = {
-        "message_id": int(args.message_id),
+        "message_id": str(args.message_id),
         "emoji_id": str(args.emoji_id),
         "set": bool(args.set),
     }
     try:
-        raw = await ctx.adapter.call_api("set_msg_emoji_like", **params)
+        target = _target_from_conversation(ctx)
+        await ctx.adapter.set_reaction(
+            target,
+            str(args.message_id),
+            str(args.emoji_id),
+            remove=not bool(args.set),
+        )
+        raw = {"ok": True}
     except Exception as e:
         logger.warning("set_msg_emoji_like 调用失败 params=%s: %s", params, e)
         return {
@@ -142,6 +154,47 @@ async def set_msg_emoji_like(args: SetMsgEmojiLikeArgs, ctx: ToolContext) -> dic
         "data": _emoji_like_data(args),
         "raw": raw,
     }
+
+
+def _ctx_self_id(ctx: ToolContext) -> str | None:
+    target = ctx.extras.get("default_reply_target")
+    if isinstance(target, dict) and target.get("self_id"):
+        return str(target["self_id"])
+    return str(ctx.extras.get("self_id") or "") or None
+
+
+def _target_for(
+    ctx: ToolContext, group_id: str | None, user_id: str
+) -> Target:
+    if group_id:
+        return Target(
+            adapter=ctx.adapter.name if ctx.adapter else "",
+            scope="group",
+            target_id=str(group_id),
+            self_id=_ctx_self_id(ctx),
+        )
+    return Target(
+        adapter=ctx.adapter.name if ctx.adapter else "",
+        scope="private",
+        target_id=str(user_id),
+        self_id=_ctx_self_id(ctx),
+    )
+
+
+def _target_from_conversation(ctx: ToolContext) -> Target:
+    conversation = str(ctx.conversation_id or "")
+    if conversation.startswith("group:"):
+        scope, target_id = "group", conversation.split(":", 1)[1]
+    elif conversation.startswith("private:"):
+        scope, target_id = "private", conversation.split(":", 1)[1]
+    else:
+        scope, target_id = "private", ""
+    return Target(
+        adapter=ctx.adapter.name if ctx.adapter else "",
+        scope=scope,  # type: ignore[arg-type]
+        target_id=target_id,
+        self_id=_ctx_self_id(ctx),
+    )
 
 
 def _resolve_group_id(group_id: int | None, ctx: ToolContext) -> str | None:

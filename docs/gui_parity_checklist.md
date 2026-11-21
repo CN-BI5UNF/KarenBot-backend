@@ -675,18 +675,14 @@ DISPLAY=:1.0 .venv/bin/python scripts/gui_smoke.py \
 - [x] `adapters.default.port` · 端口（`int`）
 - [x] `adapters.default.path` · 路径（`str`）
 - [x] `adapters.default.access_token_id` · Access Token（`secret_ref`）
-- [x] `adapters.default.manage_process` · 由 Karen 拉起 NapCat（`bool`）
-- [x] `adapters.default.process_path` · NapCat 启动路径（`str`）
 - [x] `adapters.default.api_timeout_seconds` · API 超时（秒）（`float`）
 - [x] `adapters.default.ping_interval_seconds` · 心跳间隔（秒）（`float`）
 
-### 渠道高级（`adapter_advanced`，14 项）
+### 渠道高级（`adapter_advanced`，11 项）
 
-重连节奏与进程管理字段全部可写；帮助文字来自 settings_spec。
+重连节奏与超时字段全部可写；进程托管已移到「外部程序」，帮助文字来自 settings_spec。
 
-- [x] `adapters.default.auto_restart` · 断线自动重连（`bool`）
-- [x] `adapters.default.process_args` · 启动参数（`list_str`）
-- [x] `adapters.default.startup_connect_timeout_seconds` · 进程启动后等待连接（秒）（`float`）
+- [x] `adapters.default.startup_connect_timeout_seconds` · 启动时等待首次连接（秒）（`float`）
 - [x] `adapters.default.initial_connect_timeout_seconds` · 首次连接超时（秒）（`float`）
 - [x] `adapters.default.api_wait_connected_timeout_seconds` · 等连接再发 API 的上限（秒）（`float`）
 - [x] `adapters.default.fast_reconnect_attempts` · 快速重试次数（`int`）
@@ -696,7 +692,6 @@ DISPLAY=:1.0 .venv/bin/python scripts/gui_smoke.py \
 - [x] `adapters.default.reconnect_jitter_seconds` · 重连抖动（秒）（`float`）
 - [x] `adapters.default.max_reconnect_attempts` · 最大重连次数（`int`）
 - [x] `adapters.default.ping_timeout_seconds` · 心跳超时（秒）（`float`）
-- [x] `adapters.default.process_warmup_seconds` · 托管进程预热（秒）（`float`）
 - [x] `adapters.default.voice_fetch_delay_seconds` · 语音转写等待（秒）（`float`）
 
 ### 软件行为（`behavior`，12 项）
@@ -951,7 +946,7 @@ JSON 字段支持失焦保存和 Ctrl+Enter；后端返回带行号的 JSON 错�
 - [x] 主模型原生图片策略始终可见，与独立视觉开关分开
 - [x] 每图 token 预留默认 8192、允许 256–65536；单请求最大图片数 1–20
 - [x] 思考强度档位跟随当前预设/模型，包含 minimal；关闭思考时隐藏
-- [x] NapCat 进程路径/自动重连按 manage_process 显示；白名单字段仅在 whitelist 模式显示
+- [x] 白名单字段仅在 whitelist 模式显示；进程托管已移到设置 → 外部程序
 - [x] 进度读取失败时禁用下一步并自动重试，避免使用旧的 is_last 提前提交
 - [~] 向导提供商/Agent 字段覆盖日常配置；厂商细分、思考风格等高级项仍在设置/模型页调整
 

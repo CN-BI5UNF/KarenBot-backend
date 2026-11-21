@@ -268,8 +268,8 @@ class MessagePipeline(
         self._whitelist_group_ids = set(self.whitelist.group_ids)
         # blacklist=None 时视为空名单（不拦截任何人）
         self.blacklist = blacklist or BlacklistConfig()
-        self._blacklist_qq_ids: set[int] = set()
-        self._blacklist_group_ids: set[int] = set()
+        self._blacklist_qq_ids: set[str] = set()
+        self._blacklist_group_ids: set[str] = set()
         self._sync_blacklist()
         self.emoji_dir = emoji_dir
         self.workspace_dir = workspace_dir
@@ -374,6 +374,7 @@ class MessagePipeline(
         self._persona_after_turn_tasks: set[asyncio.Task[Any]] = set()
         self.chat_timeline = ChatTimelineStore(max_per_conversation=1000)
         self._self_id_by_conversation: dict[str, str] = {}
+        self._thread_id_by_conversation: dict[str, str] = {}
         # group_id -> (monotonic timestamp, member QQ set). Used only to surface
         # user-scoped important memories in group prompts.
         self._group_members_cache: dict[str, tuple[float, set[int]]] = {}
@@ -397,8 +398,8 @@ class MessagePipeline(
     def _sync_blacklist(self) -> None:
         """把黑名单配置摊平成两个 set，供入站热路径 O(1) 查询。"""
         if self.blacklist.enabled:
-            self._blacklist_qq_ids = {int(x) for x in self.blacklist.qq_ids}
-            self._blacklist_group_ids = {int(x) for x in self.blacklist.group_ids}
+            self._blacklist_qq_ids = {str(x) for x in self.blacklist.qq_ids}
+            self._blacklist_group_ids = {str(x) for x in self.blacklist.group_ids}
         else:
             self._blacklist_qq_ids = set()
             self._blacklist_group_ids = set()
@@ -411,8 +412,8 @@ class MessagePipeline(
     def apply_whitelist(self, whitelist: WhitelistConfig) -> None:
         """热更新白名单模式与名单；黑名单仍优先拦截。"""
         self.whitelist = whitelist
-        self._whitelist_qq_ids = {int(x) for x in whitelist.qq_ids}
-        self._whitelist_group_ids = {int(x) for x in whitelist.group_ids}
+        self._whitelist_qq_ids = {str(x) for x in whitelist.qq_ids}
+        self._whitelist_group_ids = {str(x) for x in whitelist.group_ids}
 
     def _tool_routing_enabled(self) -> bool:
         return (
@@ -567,6 +568,12 @@ class MessagePipeline(
 
     async def _resolve_group_member_qqs(self, group_id: str) -> set[int]:
         """Return cached group member QQ ids; failure falls back to stale cache or empty."""
+        if not getattr(
+            getattr(self.adapter, "capabilities", None),
+            "list_group_members",
+            False,
+        ):
+            return set()
         now = time.monotonic()
         cached = self._group_members_cache.get(group_id)
         if cached is not None:

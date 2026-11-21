@@ -21,6 +21,35 @@ from utils.video_contracts import VideoAssetError, VideoLimits
 logger = logging.getLogger("core.message_pipeline")
 
 
+def _is_public_http_url(url: str) -> bool:
+    """仅允许公网 http(s) URL 作为语音下载来源，阻断 SSRF。"""
+    import ipaddress
+
+    try:
+        parsed = urlsplit(str(url))
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    if parsed.username or parsed.password:
+        return False
+    host = parsed.hostname.lower().rstrip(".")
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_unspecified
+        or ip.is_multicast
+    )
+
+
 class MediaPipelineMixin:
     async def _build_readable_text(self, event: IncomingMessage) -> str:
         """把 IncomingMessage 重建为人类可读文本（CQ 解析 + 媒体 URL/转录附加）。
@@ -197,16 +226,45 @@ class MediaPipelineMixin:
                 elif seg.type in (MediaType.VOICE, MediaType.RECORD):
                     # 先把语音文件落到 workspace，供本地/API ASR 使用；失败不阻塞后续 fallback。
                     ws_path = None
-                    if seg.url:
+                    voice_source = seg.url
+                    if voice_source and not _is_public_http_url(str(voice_source)):
+                        # 入站 URL 可能是内网/回环/本地文件；语音 ASR 不接受这类来源。
+                        voice_source = None
+                    native_stt = bool(
+                        getattr(getattr(self.adapter, "capabilities", None), "voice_stt", False)
+                    )
+                    if (
+                        not voice_source
+                        and seg.file_id
+                        and not native_stt
+                        and self._is_opaque_platform_file_id(seg.file_id)
+                    ):
+                        resolver = getattr(self.adapter, "get_file_url", None)
+                        if resolver is not None:
+                            try:
+                                resolved = await resolver(seg.file_id)
+                            except (AttributeError, NotImplementedError):
+                                resolved = None
+                            except Exception:  # noqa: BLE001
+                                logger.warning("适配器语音 resolver 执行失败（已隐藏来源）")
+                                resolved = None
+                            if isinstance(resolved, str) and resolved.strip():
+                                voice_source = resolved.strip()
+                    if voice_source:
+                        voice_suffix = (
+                            Path(str(voice_source).split("?", 1)[0]).suffix or ".amr"
+                        )
                         ws_path = await self._save_media_to_workspace(
-                            seg.url, suggested_name=f"voice_{event.message_id}.amr"
+                            voice_source,
+                            suggested_name=f"voice_{event.message_id}{voice_suffix}",
+                            public_only=True,
                         )
                     voice_text = await self._transcribe_voice_with_asr(event, ws_path)
                     if not voice_text:
                         voice_text = await self._fetch_voice_text_from_adapter(event)
                     suffix_parts = []
-                    if seg.url:
-                        suffix_parts.append(f"url={seg.url}")
+                    if voice_source and voice_source.startswith(("http://", "https://")):
+                        suffix_parts.append(f"url={voice_source}")
                     if ws_path:
                         suffix_parts.append(f"workspace={ws_path}")
                     suffix = f" {' '.join(suffix_parts)}" if suffix_parts else ""
@@ -631,7 +689,7 @@ class MediaPipelineMixin:
             return ""
 
     async def _save_media_to_workspace(
-        self, url: str, suggested_name: str
+        self, url: str, suggested_name: str, *, public_only: bool = False
     ) -> str | None:
         """下载/复制媒体到 data/workspace/incoming/，返回相对 workspace 的路径。
 
@@ -687,8 +745,14 @@ class MediaPipelineMixin:
             else:
                 if not url.startswith(("http://", "https://")):
                     return None
-                async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                if public_only and not _is_public_http_url(url):
+                    return None
+                async with httpx.AsyncClient(
+                    timeout=20.0, follow_redirects=not public_only
+                ) as client:
                     resp = await client.get(url)
+                    if public_only and resp.is_redirect:
+                        return None
                     resp.raise_for_status()
                     await asyncio.to_thread(dest.write_bytes, resp.content)
             return f"incoming/{dest.name}"

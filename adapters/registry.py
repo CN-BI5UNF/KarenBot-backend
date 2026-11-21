@@ -130,15 +130,31 @@ class AdapterRegistry:
 
 
 _factories: dict[str, AdapterFactory] = {}
+_builtin_loading = False
+_builtin_loaded = False
+
+
+def _ensure_builtin_adapters() -> None:
+    """懒加载内置适配器，避免 ``import adapters`` 时拖入配置/密钥依赖。"""
+    global _builtin_loading, _builtin_loaded
+    if _builtin_loaded or _builtin_loading:
+        return
+    _builtin_loading = True
+    try:
+        import adapters.onebot11  # noqa: F401  （导入即注册 onebot11 / napcat）
+        import adapters.telegram  # noqa: F401  （导入即注册 telegram）
+        _builtin_loaded = True
+    finally:
+        _builtin_loading = False
 
 
 def register_adapter_type(type_name: str, factory: AdapterFactory) -> None:
     """注册一个适配器工厂。配置中 type=<type_name> 时会调用该工厂。
 
-    用法（在 adapters/napcat/__init__.py 中）：
+    用法（在 adapters/onebot11/__init__.py 中）：
         from adapters.registry import register_adapter_type
-        from .napcat_adapter import NapCatAdapter
-        register_adapter_type("napcat", NapCatAdapter.from_config)
+        from .adapter import OneBot11Adapter
+        register_adapter_type("onebot11", OneBot11Adapter.from_config)
     """
     if type_name in _factories:
         raise ValueError(f"适配器类型已注册: {type_name}")
@@ -148,6 +164,7 @@ def register_adapter_type(type_name: str, factory: AdapterFactory) -> None:
 
 def build_adapter(name: str, type_name: str, **kwargs) -> IAdapter:
     """按类型构建适配器实例。"""
+    _ensure_builtin_adapters()
     factory = _factories.get(type_name)
     if factory is None:
         raise ValueError(
@@ -157,4 +174,5 @@ def build_adapter(name: str, type_name: str, **kwargs) -> IAdapter:
 
 
 def known_adapter_types() -> list[str]:
+    _ensure_builtin_adapters()
     return list(_factories.keys())

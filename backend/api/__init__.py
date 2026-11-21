@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 from . import (
+    adapters,
     admin,
     backup,
     chats,
@@ -32,6 +33,7 @@ from . import (
     overview,
     personas,
     plugins,
+    programs,
     providers,
     settings,
     slang,
@@ -44,6 +46,7 @@ from . import (
 # 注册顺序即 OpenAPI 里的分组顺序
 ALL_ROUTERS = [
     system.router,
+    adapters.router,
     admin.router,
     overview.router,
     chats.router,
@@ -57,6 +60,7 @@ ALL_ROUTERS = [
     emoji.router,
     providers.router,
     settings.router,
+    programs.router,
     container.router,
     workspace.router,
     storage.router,

@@ -575,7 +575,7 @@ def _run_cli_wizard_legacy(paths) -> None:
     else:
         # fresh
         cfg = RootConfig(
-            version=2,
+            version=3,
             adapters={"default": new_napcat},
             providers={
                 "deepseek_main": ProviderConfig(

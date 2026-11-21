@@ -25,29 +25,60 @@ SETTINGS_GROUPS: list[Section] = [
     {
         "key": "adapter",
         "title": "渠道",
-        "desc": "NapCat 连接方式与入站过滤。黑白名单统一在左侧「黑白名单」页管理。",
+        "desc": (
+            "当前支持 OneBot 11（NapCat / LLOneBot / Lagrange / go-cqhttp）与 Telegram Bot API（Beta），"
+            "后续将增加 QQ 官方 Bot、Satori；"
+            "各协议的用途、配置项与前端接入契约见 docs/protocols/。"
+            "黑白名单统一在左侧「黑白名单」页管理。"
+        ),
         "fields": [
             {"path": "adapters.default.enabled", "label": "启用渠道", "type": "bool",
              "default": True, "needs_restart": True},
-            {"path": "adapters.default.mode", "label": "连接模式", "type": "enum",
-             "options": [["client", "client（程序连 NapCat 正向 WS）"],
-                         ["server", "server（程序监听，等 NapCat 反向 WS 连入）"]],
-             "default": "client", "needs_restart": True},
+            {"path": "adapters.default.transport", "label": "接入方式", "type": "enum",
+             "options": [["ws_client", "WebSocket 客户端（Karen 连协议端）"],
+                         ["ws_server", "WebSocket 服务端（协议端连 Karen）"],
+                         ["http", "HTTP API + Webhook"]],
+             "default": "ws_client", "needs_restart": True,
+             "help": "旧配置的 mode=client/server 会自动映射到 ws_client/ws_server。"},
+            {"path": "adapters.default.dialect", "label": "协议端方言", "type": "enum",
+             "options": [["auto", "自动（napcat 类型用 NapCat 方言）"],
+                         ["napcat", "NapCatQQ"],
+                         ["llonebot", "LLOneBot"],
+                         ["lagrange", "Lagrange.OneBot"],
+                         ["gocqhttp", "go-cqhttp"],
+                         ["generic", "通用标准（只调标准 API）"]],
+             "default": "auto", "needs_restart": True,
+             "help": "方言决定戳一戳、表情回应、群历史、语音转文字等扩展能力是否可用。"},
+            {"path": "adapters.default.message_format", "label": "消息格式", "type": "enum",
+             "options": [["array", "数组（推荐，避免 CQ 转义问题）"],
+                         ["string", "CQ 字符串（兼容极旧实现端）"]],
+             "default": "array", "needs_restart": True},
             {"path": "adapters.default.host", "label": "地址", "type": "str",
              "default": "127.0.0.1", "needs_restart": True},
             {"path": "adapters.default.port", "label": "端口", "type": "int",
-             "default": 3000, "min": 1, "max": 65535, "needs_restart": True},
+             "default": 3001, "min": 1, "max": 65535, "needs_restart": True},
             {"path": "adapters.default.path", "label": "路径", "type": "str",
              "default": "/", "needs_restart": True},
+            {"path": "adapters.default.http_api_url", "label": "HTTP API 地址",
+             "type": "str", "default": "", "needs_restart": True,
+             "help": "仅 HTTP 模式或「WS 收事件 + HTTP 调 API」混合部署时填写，例如 http://127.0.0.1:3000。"},
+            {"path": "adapters.default.webhook_enabled", "label": "启用 HTTP 事件上报",
+             "type": "bool", "default": False, "needs_restart": True},
+            {"path": "adapters.default.webhook_host", "label": "Webhook 监听地址",
+             "type": "str", "default": "127.0.0.1", "needs_restart": True,
+             "help": "默认只监听本机；跨设备时改 0.0.0.0，并必须配置 Webhook 密钥。"},
+            {"path": "adapters.default.webhook_port", "label": "Webhook 端口",
+             "type": "int", "default": 5700, "min": 1, "max": 65535,
+             "needs_restart": True},
+            {"path": "adapters.default.webhook_path", "label": "Webhook 路径",
+             "type": "str", "default": "/onebot11", "needs_restart": True},
+            {"path": "adapters.default.webhook_secret_id", "label": "Webhook 密钥",
+             "type": "secret_ref", "secret_id": "onebot11_webhook_secret",
+             "default": "", "needs_restart": True,
+             "help": "协议端 HTTP POST 的 HMAC-SHA1 密钥引用；留空则不验签。"},
             {"path": "adapters.default.access_token_id", "label": "Access Token",
              "type": "secret_ref", "secret_id": "napcat_default_token",
              "default": "", "needs_restart": True},
-            {"path": "adapters.default.manage_process", "label": "由 Karen 拉起 NapCat",
-             "type": "bool", "default": False, "needs_restart": True,
-             "help": "NapCat 已由系统/手动启动时请关闭；开启后会先探测 OneBot 端口，已有响应则跳过托管。"},
-            {"path": "adapters.default.process_path", "label": "NapCat 启动路径",
-             "type": "str", "default": "", "needs_restart": True,
-             "help": "填绝对路径，不要带引号；路径不存在只告警，不阻断 WS 连接。"},
             {"path": "adapters.default.api_timeout_seconds", "label": "API 超时（秒）",
              "type": "float", "default": 30.0, "needs_restart": False},
             {"path": "adapters.default.ping_interval_seconds", "label": "心跳间隔（秒）",
@@ -57,15 +88,10 @@ SETTINGS_GROUPS: list[Section] = [
     {
         "key": "adapter_advanced",
         "title": "渠道高级",
-        "desc": "重连节奏与进程管理。默认值适合大多数网络，网络不稳时再调。",
+        "desc": "重连节奏与超时。默认值适合大多数网络，网络不稳时再调。",
         "fields": [
-            {"path": "adapters.default.auto_restart", "label": "断线自动重连",
-             "type": "bool", "default": True, "needs_restart": True},
-            {"path": "adapters.default.process_args", "label": "启动参数",
-             "type": "list_str", "default": [], "needs_restart": True,
-             "help": "传给 NapCat 启动路径的附加参数，逗号或换行分隔"},
             {"path": "adapters.default.startup_connect_timeout_seconds",
-             "label": "进程启动后等待连接（秒）", "type": "float", "default": 30.0,
+             "label": "启动时等待首次连接（秒）", "type": "float", "default": 30.0,
              "needs_restart": True},
             {"path": "adapters.default.initial_connect_timeout_seconds",
              "label": "首次连接超时（秒）", "type": "float", "default": 15.0,
@@ -95,13 +121,19 @@ SETTINGS_GROUPS: list[Section] = [
             {"path": "adapters.default.ping_timeout_seconds",
              "label": "心跳超时（秒）", "type": "float", "default": 10.0,
              "needs_restart": True},
-            {"path": "adapters.default.process_warmup_seconds",
-             "label": "托管进程预热（秒）", "type": "float", "default": 3.0,
-             "needs_restart": True},
             {"path": "adapters.default.voice_fetch_delay_seconds",
              "label": "语音转写等待（秒）", "type": "float", "default": 1.0,
              "needs_restart": False},
         ],
+    },
+    {
+        "key": "programs",
+        "title": "外部程序",
+        "desc": (
+            "KarenBot 启动时可选拉起任意外部程序或旁路服务。启动失败只记录"
+            "错误并提醒，不会影响主程序；可设置随 KarenBot 关闭而停止。"
+        ),
+        "fields": [],
     },
     {
         "key": "behavior",
@@ -783,9 +815,26 @@ def iter_fields():
             yield group["key"], field
 
 
+# 旧前端仍可能 PATCH adapters.default.mode；保留隐藏别名，不在设置页展示。
+# 写入后会由 OneBot11BaseConfig 的 model_validator 同步到 transport。
+_COMPAT_FIELDS: dict[str, dict[str, Any]] = {
+    "adapters.default.mode": {
+        "path": "adapters.default.mode",
+        "label": "连接模式（已弃用）",
+        "type": "enum",
+        "options": [["client", "client"], ["server", "server"]],
+        "default": "client",
+        "needs_restart": True,
+        "hidden": True,
+    },
+}
+
+
 def field_map() -> dict[str, dict[str, Any]]:
     """``path -> field 声明``。"""
-    return {field["path"]: field for _group, field in iter_fields()}
+    mapping = {field["path"]: field for _group, field in iter_fields()}
+    mapping.update(_COMPAT_FIELDS)
+    return mapping
 
 
 __all__ = [

@@ -9,9 +9,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from utils.image_contracts import (
     DEFAULT_IMAGE_TOKEN_RESERVE,
@@ -73,18 +74,40 @@ class AppMeta(StrictModel):
 
 
 class WhitelistConfig(StrictModel):
-    """入站消息过滤模式。由 message_pipeline 入口检查 sender QQ / 群 ID。"""
+    """入站消息过滤模式。由 message_pipeline 入口检查发送者 / 群 ID。
+
+    所有 ID 统一存字符串：QQ 号码是数字字符串，Telegram / Discord / Satori
+    等平台可能是非数字 ID，避免接入时再做全库迁移。
+    """
 
     mode: Literal["open", "verify", "whitelist"] = "verify"
     """open = 对所有人开放（不安全：陌生人发消息也会触发 AI 回复，可能产生意外 API 费用）;
     verify = 管理员审核（陌生人加好友 / 加群时由 admin 审核，已加好友的不再过滤）;
     whitelist = 仅响应 qq_ids / group_ids 列表中的对象。"""
 
-    qq_ids: list[int] = Field(default_factory=list)
-    """仅在 mode=whitelist 下生效：允许的好友 QQ 号列表。"""
+    qq_ids: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("qq_ids", "user_ids"),
+    )
+    """仅在 mode=whitelist 下生效：允许的好友/用户 ID 列表。兼容 user_ids 别名。"""
 
-    group_ids: list[int] = Field(default_factory=list)
-    """仅在 mode=whitelist 下生效：允许的群号列表。"""
+    group_ids: list[str] = Field(default_factory=list)
+    """仅在 mode=whitelist 下生效：允许的群/频道 ID 列表。"""
+
+    @field_validator("qq_ids", "group_ids", mode="before")
+    @classmethod
+    def coerce_ids_to_str(cls, value: Any) -> list[str]:
+        """兼容旧配置里的整数 ID。"""
+        if not value:
+            return []
+        if isinstance(value, (str, int)):
+            value = [value]
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    @property
+    def user_ids(self) -> list[str]:
+        """跨平台语义别名。"""
+        return list(self.qq_ids)
 
 
 class BlacklistConfig(StrictModel):
@@ -98,29 +121,157 @@ class BlacklistConfig(StrictModel):
     enabled: bool = False
     """关掉时整份名单不生效，方便临时放行而不丢名单内容。"""
 
-    qq_ids: list[int] = Field(default_factory=list)
-    """被拉黑的 QQ 号：私聊直接丢弃，群聊中该成员的发言也不触发回复。"""
+    qq_ids: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("qq_ids", "user_ids"),
+    )
+    """被拉黑的用户 ID：私聊直接丢弃，群聊中该成员的发言也不触发回复。兼容 user_ids 别名。"""
 
-    group_ids: list[int] = Field(default_factory=list)
-    """被拉黑的群号：该群所有消息一律丢弃。"""
+    group_ids: list[str] = Field(default_factory=list)
+    """被拉黑的群/频道 ID：该群所有消息一律丢弃。"""
+
+    @field_validator("qq_ids", "group_ids", mode="before")
+    @classmethod
+    def coerce_ids_to_str(cls, value: Any) -> list[str]:
+        if not value:
+            return []
+        if isinstance(value, (str, int)):
+            value = [value]
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    @property
+    def user_ids(self) -> list[str]:
+        return list(self.qq_ids)
 
 
-class NapCatAdapterConfig(StrictModel):
-    type: Literal["napcat"] = "napcat"
+class BaseAdapterConfig(StrictModel):
+    """所有渠道适配器的公共配置。"""
+
     enabled: bool = True
+    """是否启用该渠道。"""
+
+    whitelist: WhitelistConfig = Field(default_factory=WhitelistConfig)
+    """入站白名单。"""
+
+    blacklist: BlacklistConfig = Field(default_factory=BlacklistConfig)
+    """入站黑名单（优先级高于白名单）。"""
+
+
+PROGRAM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+class ExternalProgramConfig(StrictModel):
+    """由 KarenBot 在启动时可选拉起的外部程序/旁路服务。
+
+    配置校验只保证字段形状；可执行文件是否存在、端口是否可达都在运行时
+    判断。启动失败只记录错误并提醒，不能让 Runtime 启动失败。
+    """
+
+    name: str = ""
+    """显示名称；留空时界面回落到程序 ID。"""
+
+    enabled: bool = True
+    """是否在 KarenBot 启动时尝试拉起。"""
+
+    executable: str = ""
+    """可执行文件或启动脚本；可写绝对路径，也可写 PATH 中的命令名。"""
+
+    args: list[str] = Field(default_factory=list)
+    """启动参数列表；不经过 shell，不支持管道/重定向。"""
+
+    cwd: str = ""
+    """工作目录；留空时使用可执行文件所在目录，再退回到项目根目录。"""
+
+    env: dict[str, str] = Field(default_factory=dict)
+    """追加到继承环境之上的环境变量；值以明文保存在 config.yaml。"""
+
+    stop_with_karen: bool = True
+    """KarenBot 关闭时是否一并停止由它实际拉起的进程。"""
+
+    probe_host: str = "127.0.0.1"
+    """启动前 TCP 探测地址；probe_port=0 时不探测。"""
+
+    probe_port: int = Field(default=0, ge=0, le=65535)
+    """启动前 TCP 探测端口；已监听则视为外部已运行，跳过启动。"""
+
+    auto_restart: bool = False
+    """意外退出后是否自动重启。与渠道适配器的断线重连无关。"""
+
+    startup_wait_seconds: float = Field(default=2.0, ge=0.0, le=300.0)
+    """启动后等待多久判定为没有快速退出；0 表示不等待。"""
+
+    @field_validator("name", "executable", "cwd", "probe_host", mode="before")
+    @classmethod
+    def _normalize_text(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    @field_validator("executable", mode="before")
+    @classmethod
+    def _strip_outer_quotes(cls, value: Any) -> str:
+        """去掉 Windows 资源管理器“复制路径”带上的外层引号。"""
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        while len(text) >= 2 and (
+            (text[0] == text[-1] and text[0] in {'"', "'"})
+            or (text[0] in {"“", "‘"} and text[-1] in {"”", "’"})
+        ):
+            text = text[1:-1].strip()
+        return text
+
+    @field_validator("args", mode="before")
+    @classmethod
+    def _normalize_args(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value] if value else []
+        return [str(item) for item in value]
+
+    @field_validator("env", mode="before")
+    @classmethod
+    def _normalize_env(cls, value: Any) -> dict[str, str]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("env 必须是 KEY=VALUE 形式的对象")
+        normalized: dict[str, str] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key).strip()
+            if not key or "=" in key or "\x00" in key:
+                raise ValueError(f"env 变量名不合法: {raw_key!r}")
+            text = str(raw_value)
+            if "\x00" in text:
+                raise ValueError(f"env 变量 {key} 的值包含 NUL")
+            normalized[key] = text
+        return normalized
+
+
+class OneBot11BaseConfig(BaseAdapterConfig):
+    """OneBot 11 通用配置基类（NapCat 与标准 OneBot 11 共用）。"""
 
     mode: Literal["client", "server"] = "client"
-    """连接模式（从 KarenBot 视角命名，符合直觉）：
+    """兼容旧配置的连接模式（client = Karen 连协议端；server = 协议端连 Karen）。"""
 
-        - "client"：程序作为 WebSocket **客户端**，主动连 NapCat 的 WS 端口。
-          对应 NapCat 那边配置「正向 WS」（NapCat 监听，等程序连入）。
-        - "server"：程序作为 WebSocket **服务端**，监听端口等 NapCat 连入。
-          对应 NapCat 那边配置「反向 WS」（NapCat 主动连出到程序）。
+    transport: Literal["ws_client", "ws_server", "http"] = "ws_client"
+    """新配置项。ws_client / ws_server 分别对应旧 mode 的 client / server；
+    http 表示 HTTP API + HTTP POST Webhook。"""
 
-    两种模式用同一组 host/port/path 字段，含义对称：
-        - client：程序去连 ws://{host}:{port}{path}
-        - server：程序在 {host}:{port}{path} 监听
-    """
+    dialect: Literal[
+        "auto", "napcat", "llonebot", "lagrange", "gocqhttp", "generic"
+    ] = "auto"
+    """协议端方言。auto：type=napcat 用 NapCat 方言，type=onebot11 用 generic。"""
+
+    message_format: Literal["array", "string"] = "array"
+    """出站消息格式。数组格式可避免 base64 图片拼进 CQ 串导致的转义问题。"""
+
+    # 连接模式（从 KarenBot 视角命名，符合直觉）：
+    #   client：程序作为 WS 客户端，主动连协议端的 WS 端口（协议端配「正向 WS」）；
+    #   server：程序作为 WS 服务端监听端口，等协议端连入（协议端配「反向 WS」）。
+    # 两种模式共用 host / port / path：client 连 ws://{host}:{port}{path}，
+    # server 在 {host}:{port}{path} 监听。
 
     # WS 连接端点（两种模式共用同一组字段）
     host: str = "127.0.0.1"
@@ -141,6 +292,49 @@ class NapCatAdapterConfig(StrictModel):
         if not raw.startswith("/"):
             return "/" + raw
         return raw
+
+    # HTTP API / HTTP POST Webhook（transport=http 或混合部署时使用）
+    http_api_url: str = ""
+    """HTTP API 出站地址，例如 http://127.0.0.1:3000。配置后出站优先走 HTTP。"""
+
+    webhook_enabled: bool = False
+    """是否启用 HTTP POST 入站。transport=http 时默认视为启用。"""
+
+    webhook_host: str = "127.0.0.1"
+    """Webhook 监听地址。默认只监听本机；跨设备时显式改 0.0.0.0 并配置密钥。"""
+
+    webhook_port: int = 5700
+    """Webhook 监听端口（与 WebUI 端口分开）。"""
+
+    webhook_path: str = "/onebot11"
+    """Webhook 路径；协议端 HTTP POST 地址填 http://本机:端口 + 此路径。"""
+
+    webhook_secret_id: str | None = None
+    """HMAC-SHA1 校验密钥在 SecretsManager 中的引用 ID。"""
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_mode_and_transport(cls, data: Any) -> Any:
+        """兼容旧配置的 mode，并把 mode/transport 双向补齐。"""
+        if not isinstance(data, dict):
+            return data
+        payload = dict(data)
+        transport = str(payload.get("transport") or "").strip().lower()
+        mode = str(payload.get("mode") or "").strip().lower()
+
+        if transport in {"ws_client", "ws_server", "http"}:
+            if transport == "ws_server":
+                payload["mode"] = "server"
+            elif transport == "ws_client":
+                payload["mode"] = "client"
+            else:
+                payload.setdefault("mode", "client")
+        elif mode in {"client", "server"}:
+            payload["transport"] = "ws_server" if mode == "server" else "ws_client"
+        else:
+            payload["mode"] = "client"
+            payload["transport"] = "ws_client"
+        return payload
 
     # 鉴权：填 SecretsManager 中的【密钥 ID】，不是 token 本身。
     # 例如 "napcat_default_token" 这种短标识，对应 secrets 中保存的实际 token。
@@ -173,26 +367,6 @@ class NapCatAdapterConfig(StrictModel):
                 f"如果你想保存新 token，请用 `python main.py --napcat` 重新配置。"
             )
         return v
-
-    # 进程托管
-    manage_process: bool = False
-    process_path: str = ""
-    process_args: list[str] = Field(default_factory=list)
-    auto_restart: bool = True
-
-    @field_validator("process_path", mode="before")
-    @classmethod
-    def normalize_process_path(cls, value: Any) -> str:
-        """去掉 Windows 资源管理器“复制路径”带上的外层引号。"""
-        if not isinstance(value, str):
-            return value
-        text = value.strip()
-        while len(text) >= 2 and (
-            (text[0] == text[-1] and text[0] in {'"', "'"})
-            or (text[0] in {"“", "‘"} and text[-1] in {"”", "’"})
-        ):
-            text = text[1:-1].strip()
-        return text
 
     # 重连参数
     reconnect_interval_seconds: float = 3.0
@@ -228,21 +402,100 @@ class NapCatAdapterConfig(StrictModel):
     reconnect_jitter_seconds: float = 0.2
     """慢速重连等待的随机抖动上限。"""
 
-    process_warmup_seconds: float = 2.0
-    """manage_process=True 时拉起 NapCat 后等待启动的时间。"""
-
     voice_fetch_delay_seconds: float = 1.0
     """fetch_voice_text 前等 NapCat 处理语音的延迟。"""
 
-    # 白名单
-    whitelist: WhitelistConfig = Field(default_factory=WhitelistConfig)
+class NapCatAdapterConfig(OneBot11BaseConfig):
+    """NapCatQQ 配置（type=napcat）。
 
-    # 黑名单（优先级高于白名单）
-    blacklist: BlacklistConfig = Field(default_factory=BlacklistConfig)
+    行为与标准 OneBot 11 相同，只是默认方言解析为 napcat，自动启用
+    语音转文字、表情回应、群历史等扩展能力。
+    """
+
+    type: Literal["napcat"] = "napcat"
 
 
-# 未来扩展：Union[NapCatAdapterConfig, DiscordAdapterConfig, ...]
-AdapterConfig = Annotated[NapCatAdapterConfig, Field(discriminator="type")]
+class OneBot11AdapterConfig(OneBot11BaseConfig):
+    """严格标准 OneBot 11 配置（type=onebot11）。
+
+    默认 generic 方言，只调用标准公开 API；任何实现了 OneBot 11 的协议端
+    都可以开箱即用。需要扩展能力时显式设置 dialect。
+    """
+
+    type: Literal["onebot11"] = "onebot11"
+
+
+class TelegramAdapterConfig(BaseAdapterConfig):
+    """Telegram Bot API 配置（type=telegram）。"""
+
+    type: Literal["telegram"] = "telegram"
+
+    transport: Literal["long_polling", "webhook"] = "long_polling"
+    """接入方式。long_polling 不需要公网 IP；webhook 需要公网 HTTPS 回调。"""
+
+    bot_token_id: str | None = None
+    """BotFather 发放的 Bot Token 在 SecretsManager 中的引用 ID。"""
+
+    @field_validator("bot_token_id")
+    @classmethod
+    def _validate_bot_token_ref(cls, value: str | None) -> str | None:
+        if not value:
+            return value
+        head, sep, _tail = value.partition(":")
+        if sep and head.isdigit():
+            raise ValueError(
+                "bot_token_id 应填 SecretsManager 中的引用 ID（如 'telegram_main_token'），"
+                "不是 Bot Token 本身。请把 token 存进密钥管理，再在这里引用。"
+            )
+        return value
+
+    api_base: str = "https://api.telegram.org"
+    """Bot API 基址；可指向自建 Bot API Server。"""
+
+    proxy: str = ""
+    """可选的代理 URL，例如 socks5://127.0.0.1:1080。"""
+
+    webhook_host: str = "127.0.0.1"
+    """Webhook 监听地址。默认只监听本机；公网部署时改 0.0.0.0 并配置 secret_token。"""
+
+    webhook_port: int = 8443
+    """Webhook 监听端口。"""
+
+    webhook_path: str = "/telegram"
+    """Webhook 路径。"""
+
+    webhook_public_url: str = ""
+    """公网回调完整 URL；填写后启动时自动调用 setWebhook，留空则需手动设置。"""
+
+    webhook_secret_token_id: str | None = None
+    """Telegram secret_token 在 SecretsManager 中的引用 ID。"""
+
+    parse_mode: Literal["HTML", "MarkdownV2", "none"] = "HTML"
+    """出站文本解析模式。mention 用 HTML 链接实现时建议 HTML。"""
+
+    allowed_updates: list[str] = Field(default_factory=list)
+    """getUpdates 订阅的事件类型；空列表表示使用推荐集合。"""
+
+    drop_pending_updates: bool = True
+    """启动时是否丢弃积压的旧 Update。"""
+
+    polling_timeout_seconds: float = 30.0
+    """长轮询 getUpdates 的服务端等待秒数。"""
+
+    api_timeout_seconds: float = 30.0
+    """单次 Bot API 调用超时。"""
+
+    reconnect_interval_seconds: float = 3.0
+    """轮询/连接失败后的重试间隔。"""
+
+
+# 未来扩展：Annotated[Union[OneBot11AdapterConfig, NapCatAdapterConfig,
+#                          TelegramAdapterConfig, DiscordAdapterConfig, ...],
+#                      Field(discriminator="type")]
+AdapterConfig = Annotated[
+    OneBot11AdapterConfig | NapCatAdapterConfig | TelegramAdapterConfig,
+    Field(discriminator="type"),
+]
 
 
 # ============================================================
@@ -1012,8 +1265,15 @@ class ContainerFeatureConfig(StrictModel):
 class GroupTriggerRuleConfig(StrictModel):
     """One group that only starts a receive window after an @ mention."""
 
-    group_id: int = Field(..., strict=True, ge=1)
-    """QQ 群号。"""
+    group_id: int = Field(..., strict=True)
+    """群 ID。QQ 为正数，Telegram 群为负数；0 无效。"""
+
+    @field_validator("group_id")
+    @classmethod
+    def _group_id_nonzero(cls, value: int) -> int:
+        if value == 0:
+            raise ValueError("group_id 不能为 0")
+        return value
 
     max_messages: int = Field(default=0, strict=True, ge=0, le=1000)
     """被 @ 后最多连续接收的普通群消息数；0 = 不按条数关闭。"""
@@ -1957,11 +2217,13 @@ class BackupConfig(StrictModel):
 class RootConfig(StrictModel):
     """完整配置树的根。"""
 
-    version: int = 2
+    version: int = 3
 
     app: AppMeta = Field(default_factory=AppMeta)
-    adapters: dict[str, NapCatAdapterConfig] = Field(default_factory=dict)
+    adapters: dict[str, AdapterConfig] = Field(default_factory=dict)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
+    programs: dict[str, ExternalProgramConfig] = Field(default_factory=dict)
+    """随 KarenBot 启动的外部程序；键是稳定 ID，值为启动配置。"""
     agents: AgentsConfig
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     persona: PersonaConfig = Field(default_factory=PersonaConfig)
@@ -1976,11 +2238,42 @@ class RootConfig(StrictModel):
     @field_validator("version")
     @classmethod
     def validate_version(cls, v: int) -> int:
-        if v < 2:
+        if v < 3:
             raise ValueError(
-                f"配置版本过旧（v{v}），请使用迁移工具升级到 v2"
+                f"配置版本过旧（v{v}），请使用迁移工具升级到 v3"
             )
         return v
+
+    @field_validator("programs")
+    @classmethod
+    def validate_program_ids(
+        cls, value: dict[str, ExternalProgramConfig]
+    ) -> dict[str, ExternalProgramConfig]:
+        for program_id in value:
+            if not PROGRAM_ID_RE.fullmatch(program_id):
+                raise ValueError(
+                    f"程序 ID {program_id!r} 不合法；只能使用字母、数字、"
+                    "下划线和短横线，且不能以符号开头。"
+                )
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _inject_legacy_adapter_type(cls, data: Any) -> Any:
+        """旧配置可能没有 adapters.*.type；按历史默认值补成 napcat。"""
+        if not isinstance(data, dict):
+            return data
+        adapters = data.get("adapters")
+        if not isinstance(adapters, dict):
+            return data
+        payload = dict(data)
+        normalized: dict[str, Any] = {}
+        for name, item in adapters.items():
+            if isinstance(item, dict) and not item.get("type"):
+                item = {**item, "type": "napcat"}
+            normalized[name] = item
+        payload["adapters"] = normalized
+        return payload
 
     @model_validator(mode="after")
     def validate_references(self) -> RootConfig:

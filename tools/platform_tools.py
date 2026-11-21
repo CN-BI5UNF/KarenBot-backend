@@ -102,6 +102,7 @@ def _to_dict(obj) -> dict:
     category="platform",
     search_tags=["联系人", "好友", "群", "成员", "contacts", "friends", "groups", "members"],
     examples=[{"scope": "groups"}],
+    required_capability="list_friends",
 )
 async def list_contacts(args: ListContactsArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
@@ -302,6 +303,7 @@ def _public_user_info(info: dict) -> dict:
     category="platform",
     search_tags=["合并转发", "转发", "forward", "聊天记录", "expand"],
     examples=[{"forward_id": "123456", "recursive": True, "output": "auto"}],
+    required_capability="forward_read",
 )
 async def get_forward_msg(args: GetForwardMsgArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
@@ -503,6 +505,7 @@ def _write_chat_timeline_artifact(
     category="platform",
     no_feedback=True,
     search_tags=["好友", "验证", "加好友", "friend", "request", "approve"],
+    required_capability="friend_request",
 )
 async def set_friend_add_request(args: SetFriendRequestArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
@@ -608,6 +611,7 @@ def _inject_friend_whitelist(ctx: ToolContext, user_id: str) -> None:
     category="platform",
     no_feedback=True,
     search_tags=["加群", "邀请", "验证", "group", "request", "approve"],
+    required_capability="group_request",
 )
 async def set_group_add_request(args: SetGroupRequestArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:
@@ -680,6 +684,7 @@ _DEFAULT_SUMMARIZE_PROMPT = (
             "custom_prompt": "总结今天的讨论结论、分歧和待办事项。",
         }
     ],
+    required_capability="group_history",
 )
 async def summarize_chat_history(args: SummarizeChatArgs, ctx: ToolContext) -> dict:
     if ctx.adapter is None:

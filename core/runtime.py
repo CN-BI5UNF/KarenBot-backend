@@ -81,6 +81,7 @@ class Runtime:
         self.archive: Any = None
         self.rolling_summary: Any = None
         self.adapter: Any = None
+        self.adapter_registry: Any = None
         self.provider_registry: Any = None
         self.providers: dict[str, Any] = {}
         self.chat_agent: Any = None
@@ -479,20 +480,50 @@ class Runtime:
 
         # ----- 7. Adapter -----
         stage_t0 = time.monotonic()
-        from adapters.napcat.adapter import NapCatAdapter
+        from adapters.registry import AdapterRegistry, build_adapter
 
         if not self.config.adapters:
             raise RuntimeError("配置中没有任何 adapter")
-        adapter_name, adapter_cfg = next(iter(self.config.adapters.items()))
-        self.adapter = NapCatAdapter.from_config(adapter_name, adapter_cfg, self.secrets)
-        logger.debug(f"Adapter 已实例化: {adapter_name}")
+
+        enabled_adapters = [
+            (name, cfg)
+            for name, cfg in self.config.adapters.items()
+            if getattr(cfg, "enabled", True)
+        ]
+        if not enabled_adapters:
+            raise RuntimeError("配置中的所有 adapter 都处于 disabled 状态")
+        if len(enabled_adapters) > 1:
+            logger.warning(
+                "检测到 %s 个启用的适配器（%s）；当前版本仍按单主适配器运行，"
+                "只启动第一个。多适配器并存将在后续版本开放。",
+                len(enabled_adapters),
+                ", ".join(name for name, _ in enabled_adapters),
+            )
+        adapter_name, adapter_cfg = enabled_adapters[0]
+        self.adapter_registry = AdapterRegistry()
+        self.adapter = build_adapter(
+            adapter_name,
+            str(getattr(adapter_cfg, "type", "onebot11")),
+            cfg=adapter_cfg,
+            secrets=self.secrets,
+        )
+        self.adapter_registry.register(self.adapter)
+        logger.info(
+            "Adapter 已实例化: name=%s type=%s dialect=%s capabilities=%s",
+            adapter_name,
+            getattr(adapter_cfg, "type", "onebot11"),
+            getattr(getattr(self.adapter, "dialect", None), "name", "-"),
+            type(getattr(self.adapter, "capabilities", None)).__name__,
+        )
         logger.debug("Runtime 阶段完成：Adapter 构造 %.2fs", time.monotonic() - stage_t0)
 
         # ----- 8. Tools -----
         stage_t0 = time.monotonic()
         from tools import build_default_registry
 
-        self.tool_registry = build_default_registry(self.config)
+        self.tool_registry = build_default_registry(
+            self.config, capabilities=getattr(self.adapter, "capabilities", None)
+        )
         self._configured_tool_registry = self.tool_registry
         self.eat_tool = "eat" in self.tool_registry
         self.sleep_tool = "sleep" in self.tool_registry
@@ -680,7 +711,9 @@ class Runtime:
         self.event_bus.on_message(self.pipeline.enqueue)
         self.event_bus.on_notice(self.recall_handler.on_notice)
         self.event_bus.on_request(self.request_handler.on_request)
-        self.event_bus.bind_adapter(self.adapter)
+        # AdapterRegistry 统一收口事件后再交给 EventBus；不要再直接 bind_adapter，
+        # 否则同一个适配器会收到两份订阅。
+        self.adapter_registry.on_event(self.event_bus.dispatch)
 
         # ----- 14. Proactive Loop -----
         from .proactive_loop import ProactiveLoop
@@ -694,6 +727,8 @@ class Runtime:
 
         # ----- 15. 启动 adapter + proactive loop -----
         stage_t0 = time.monotonic()
+        # 当前只运行单主适配器：保持旧行为——启动失败直接让 Runtime 启动失败。
+        # AdapterRegistry 仍负责生命周期收口，为后续多适配器预留。
         await self.adapter.start()
         await self.proactive_loop.start()
         logger.debug("Runtime 阶段完成：Adapter/主动循环启动 %.2fs", time.monotonic() - stage_t0)
@@ -825,6 +860,7 @@ class Runtime:
                 self._work_agent_tool_registry = build_default_registry(
                     self.config,
                     schema_profile_override="agent",
+                    capabilities=getattr(self.adapter, "capabilities", None),
                 )
             target = self._work_agent_tool_registry
             override = "agent"
@@ -1314,7 +1350,9 @@ class Runtime:
             callable(getattr(self.persona_agent, "is_working", None))
             and self.persona_agent.is_working()
         )
-        configured = build_default_registry(self.config)
+        configured = build_default_registry(
+            self.config, capabilities=getattr(self.adapter, "capabilities", None)
+        )
         self._configured_tool_registry = configured
         self._work_agent_tool_registry = None
         self.tool_registry = configured
@@ -1331,30 +1369,79 @@ class Runtime:
     async def _reload_adapter_live(self) -> None:
         if self.config is None or not self.config.adapters:
             return
-        from adapters.napcat.adapter import NapCatAdapter
+        from adapters.registry import AdapterRegistry, build_adapter
 
-        name, cfg = next(iter(self.config.adapters.items()))
-        new_adapter = NapCatAdapter.from_config(name, cfg, self.secrets)
-        old_adapter = getattr(self, "adapter", None)
+        enabled = [
+            (name, cfg)
+            for name, cfg in self.config.adapters.items()
+            if getattr(cfg, "enabled", True)
+        ]
+        if not enabled:
+            logger.info("适配器配置已热应用；所有渠道均已停用")
+            old_adapter = getattr(self, "adapter", None)
+            self.adapter = None
+            self.adapter_registry = AdapterRegistry()
+            if self.pipeline is not None:
+                self.pipeline.adapter = None
+            if old_adapter is not None:
+                try:
+                    await old_adapter.stop()
+                except Exception:  # noqa: BLE001
+                    logger.warning("关闭旧适配器失败", exc_info=True)
+            return
+
+        name, cfg = enabled[0]
+        new_adapter = build_adapter(
+            name, str(getattr(cfg, "type", "onebot11")), cfg=cfg, secrets=self.secrets
+        )
+        new_registry = AdapterRegistry()
+        new_registry.register(new_adapter)
         if self.event_bus is not None:
-            self.event_bus.bind_adapter(new_adapter)
-        if self.pipeline is not None:
-            self.pipeline.adapter = new_adapter
-        if self.rate_limiter is not None:
-            new_adapter.set_friend_confirmed_callback(
-                self.rate_limiter.remember_friend
-            )
-        self.adapter = new_adapter
+            new_registry.on_event(self.event_bus.dispatch)
+
+        old_adapter = getattr(self, "adapter", None)
+
+        # 先停旧再启新（两者可能争用同一端口/同一个 Telegram bot token），
+        # 但启动失败时必须回滚旧适配器，避免整个运行时长期无渠道可用。
         if old_adapter is not None:
             try:
                 await old_adapter.stop()
             except Exception:  # noqa: BLE001
                 logger.warning("关闭旧适配器失败", exc_info=True)
-        if not bool(getattr(cfg, "enabled", True)):
-            logger.info("适配器配置已热应用；渠道已停用：%s", name)
-            return
-        await new_adapter.start()
-        logger.info("适配器配置已热应用并重新连接：%s", name)
+
+        try:
+            await new_adapter.start()
+        except Exception:
+            logger.exception("新适配器启动失败，尝试回滚旧适配器")
+            try:
+                await new_adapter.stop()
+            except Exception:  # noqa: BLE001
+                logger.warning("清理启动失败的新适配器时出错", exc_info=True)
+            if old_adapter is not None:
+                try:
+                    await old_adapter.start()
+                except Exception:  # noqa: BLE001
+                    logger.exception("旧适配器回滚失败；运行时当前没有可用渠道")
+            raise
+
+        # 新适配器确认可用后再切换引用与工具能力，避免半切换状态。
+        self.adapter_registry = new_registry
+        self.adapter = new_adapter
+        if self.pipeline is not None:
+            self.pipeline.adapter = new_adapter
+            self.pipeline.apply_whitelist(cfg.whitelist)
+            if getattr(cfg, "blacklist", None) is not None:
+                self.pipeline.apply_blacklist(cfg.blacklist)
+        if self.rate_limiter is not None:
+            new_adapter.set_friend_confirmed_callback(
+                self.rate_limiter.remember_friend
+            )
+        self._rebuild_tool_registry_live()
+        logger.info(
+            "适配器配置已热应用并重新连接：%s (type=%s)",
+            name,
+            getattr(cfg, "type", "onebot11"),
+        )
 
     def _sync_container_live(self) -> None:
         cfg = getattr(getattr(self.config, "features", None), "container", None)
@@ -1800,7 +1887,9 @@ class Runtime:
 
         if self.proactive_loop is not None:
             await _close("proactive_loop", self.proactive_loop.shutdown)
-        if self.adapter is not None:
+        if self.adapter_registry is not None and self.adapter_registry.list_names():
+            await _close("adapter", self.adapter_registry.stop_all)
+        elif self.adapter is not None:
             await _close("adapter", self.adapter.stop)
         if self.recall_handler is not None:
             await _close("recall_handler", self.recall_handler.shutdown)
@@ -2162,6 +2251,10 @@ class Runtime:
     async def _friend_whitelist_provider(self) -> set[str]:
         """RateLimiter 用：返回当前好友 user_id 集合。"""
         if not self.adapter:
+            return set()
+        capabilities = getattr(self.adapter, "capabilities", None)
+        if capabilities is not None and not getattr(capabilities, "list_friends", False):
+            # 例如 Telegram Bot API 不提供好友列表：不要每个私聊都抛异常刷日志。
             return set()
         try:
             friends = await self.adapter.list_friends()

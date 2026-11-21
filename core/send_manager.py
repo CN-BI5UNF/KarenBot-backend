@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from adapters.outbound import action_to_segments
 from adapters.types import Target
 from utils import get_time
 
@@ -39,6 +40,15 @@ if TYPE_CHECKING:
     from .message_pipeline import MessagePipeline
 
 logger = logging.getLogger("core.message_pipeline")
+
+
+def _normalize_mentions(value: Any) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    return [str(item).strip() for item in value if str(item).strip()]
+
 
 _action_content_fingerprint = _send_receipts._action_content_fingerprint
 _drop_none = _send_receipts._drop_none
@@ -767,6 +777,10 @@ class _AsyncSendManager:
             "image_path": str(action.get("image_path") or ""),
             "image_url": str(action.get("image_url") or ""),
             "face_id": str(action.get("face_id") or ""),
+            "reply_to": str(action.get("reply_to") or ""),
+            "mentions": _normalize_mentions(action.get("mentions")),
+            "thread_id": str(action.get("thread_id") or ""),
+            "self_id": str(action.get("self_id") or ""),
             "interrupt_policy": str(action.get("interrupt_policy") or "interrupt_all"),
         }
 
@@ -1018,14 +1032,12 @@ class _AsyncSendManager:
         reply_to = str(reply_to_message_id or "").strip()
         if not reply_to:
             return
-        prefix = f"[CQ:reply,id={reply_to}]"
         for action in actions:
-            if action.get("kind", "text") not in {"text", "face"}:
+            if action.get("kind", "text") == "voice":
                 continue
-            content = str(action.get("content") or "")
-            if content.startswith("[CQ:reply,"):
+            if action.get("reply_to"):
                 return
-            action["content"] = f"{prefix}{content}"
+            action["reply_to"] = reply_to
             return
 
     def _can_sync_send(self, conversation_id: str, actions: list[dict[str, Any]]) -> bool:
@@ -1319,33 +1331,23 @@ class _AsyncSendManager:
             adapter=self.pipeline.adapter.name,
             scope=action["target_scope"],  # type: ignore[arg-type]
             target_id=action["target_id"],
+            thread_id=str(action.get("thread_id") or "") or None,
+            self_id=str(action.get("self_id") or "") or None,
         )
         kind = action.get("kind", "text")
         await self._record_send_message_started(send_id, action, conversation_id)
         if kind == "voice":
-            send_voice = getattr(self.pipeline.adapter, "send_voice", None)
-            if send_voice is None:
+            if not getattr(self.pipeline.adapter.capabilities, "send_voice", False):
                 raise RuntimeError("当前适配器不支持发送语音")
-            msg_id = await send_voice(target, Path(action.get("audio_path") or ""))
-        elif kind in {"emoji", "image"}:
-            msg_id = await self.pipeline.adapter.send_image(
-                target,
-                image_path=(
-                    Path(str(action.get("image_path")))
-                    if action.get("image_path")
-                    else None
-                ),
-                image_url=str(action.get("image_url") or "") or None,
+            msg_id = await self.pipeline.adapter.send_voice(
+                target, Path(action.get("audio_path") or "")
             )
-        elif kind == "face":
-            face_id = str(action.get("face_id") or "")
-            content = str(action.get("content") or "")
-            if not content and face_id:
-                content = f"[CQ:face,id={face_id}]"
-            msg_id = await self.pipeline.adapter.send_text(target, content)
         else:
-            content = action.get("content") or ""
-            msg_id = await self.pipeline.adapter.send_text(target, content)
+            # 文本/表情/图片统一走结构化段：回复、@ 等元数据不会因为
+            # kind=image 而被静默丢弃。
+            msg_id = await self.pipeline.adapter.send_message(
+                target, action_to_segments(action)
+            )
 
         self.pipeline.mark_activity()
         if msg_id is not None:

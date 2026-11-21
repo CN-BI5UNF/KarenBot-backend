@@ -23,9 +23,10 @@ _BASE_MANIFEST = {
     "irreversible": False,
     "planes": {
         "root_config": {
-            "supported_read": 2,
-            "supported_write": 2,
-            "target_version": 2,
+            "supported_read": 3,
+            "supported_write": 3,
+            "target_version": 3,
+            "min_local_version": 2,
         },
         "persona_db": {
             "supported_read": 2,
@@ -57,7 +58,7 @@ _BASE_MANIFEST = {
 def _local(version: int) -> LocalDataState:
     return LocalDataState(
         planes={
-            "root_config": 2,
+            "root_config": 3,
             "persona_db": version,
             "maintenance": 1,
             "rag": 0,
@@ -85,6 +86,35 @@ def test_v1_and_v2_local_databases_are_accepted() -> None:
 
     assert evaluate(manifest, _local(1))["code"] == "compatible"
     assert evaluate(manifest, _local(2))["code"] == "compatible"
+
+
+def _local_with_root(version: int) -> LocalDataState:
+    return LocalDataState(
+        planes={
+            "root_config": version,
+            "persona_db": 2,
+            "maintenance": 1,
+            "rag": 0,
+            "projection": 0,
+        },
+        databases=(),
+    )
+
+
+def test_root_config_v2_is_accepted_for_loader_migration() -> None:
+    manifest = _manifest()
+
+    assert evaluate(manifest, _local_with_root(2))["code"] == "compatible"
+    assert evaluate(manifest, _local_with_root(3))["code"] == "compatible"
+
+
+def test_root_config_v1_requires_migration() -> None:
+    manifest = _manifest()
+
+    result = evaluate(manifest, _local_with_root(1))
+
+    assert result["compatible"] is False
+    assert result["code"] == "migration_required"
 
 
 def test_newer_local_database_is_rejected() -> None:

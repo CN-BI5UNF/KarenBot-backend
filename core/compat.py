@@ -40,7 +40,7 @@ REQUIRED_PLANES = (
     "projection",
 )
 DEFAULT_PLANES = {
-    "root_config": 2,
+    "root_config": 3,
     "persona_db": 1,
     "maintenance": 1,
     "rag": 0,

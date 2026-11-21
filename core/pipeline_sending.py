@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from adapters.outbound import action_to_segments
 from adapters.types import Target
 from utils import get_time
 
@@ -421,7 +422,21 @@ class PipelineSendingMixin:
         scope, target_id = conversation_id.split(":", 1)
         if scope not in {"private", "group"}:
             return None
-        return Target(adapter=self.adapter.name, scope=scope, target_id=target_id)  # type: ignore[arg-type]
+        self_id = None
+        mapping = getattr(self, "_self_id_by_conversation", None)
+        if isinstance(mapping, dict):
+            self_id = mapping.get(conversation_id) or None
+        thread_id = None
+        thread_mapping = getattr(self, "_thread_id_by_conversation", None)
+        if isinstance(thread_mapping, dict):
+            thread_id = thread_mapping.get(conversation_id) or None
+        return Target(
+            adapter=self.adapter.name,
+            scope=scope,  # type: ignore[arg-type]
+            target_id=target_id,
+            thread_id=str(thread_id) if thread_id else None,
+            self_id=str(self_id) if self_id else None,
+        )
 
     async def _do_send(self, action: dict) -> str | None:
         """把单个 collected action 真实发送出去。
@@ -434,7 +449,14 @@ class PipelineSendingMixin:
         content = action.get("content", "")
         label = action.get("label", "")
         kind = action.get("kind", "text")
-        if kind != "voice" and not content:
+        has_payload = bool(content or action.get("audio_path"))
+        if kind == "face":
+            has_payload = bool(action.get("face_id") or content)
+        elif kind in {"emoji", "image"}:
+            has_payload = bool(
+                action.get("image_path") or action.get("image_url")
+            )
+        if not has_payload:
             return None
 
         # collected 字典里 "action" 字段历史上叫法是 "private"|"group"，与 Target.scope 一致
@@ -448,6 +470,8 @@ class PipelineSendingMixin:
             adapter=self.adapter.name,
             scope=scope,
             target_id=target_id,
+            thread_id=str(action.get("thread_id") or "") or None,
+            self_id=str(action.get("self_id") or "") or None,
         )
 
         try:
@@ -458,15 +482,16 @@ class PipelineSendingMixin:
                         f"⚠ 发送失败 → {label or target_id}（缺少语音文件路径）"
                     )
                     return None
-                send_voice = getattr(self.adapter, "send_voice", None)
-                if send_voice is None:
+                if not getattr(self.adapter.capabilities, "send_voice", False):
                     await self.history.add_system_note(
                         f"⚠ 发送失败 → {label or target_id}（当前适配器不支持发送语音）"
                     )
                     return None
-                msg_id = await send_voice(target, Path(audio_path))
+                msg_id = await self.adapter.send_voice(target, Path(audio_path))
             else:
-                msg_id = await self.adapter.send_text(target, content)
+                msg_id = await self.adapter.send_message(
+                    target, action_to_segments(action)
+                )
         except Exception as e:
             logger.error(f"发送失败 {target}: {e}")
             await self.history.add_system_note(

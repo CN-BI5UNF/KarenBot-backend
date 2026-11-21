@@ -591,12 +591,9 @@ async def inject(
 def _is_blacklisted(pipeline: Any, event: Any) -> bool:
     qq_ids = getattr(pipeline, "_blacklist_qq_ids", set()) or set()
     group_ids = getattr(pipeline, "_blacklist_group_ids", set()) or set()
-    try:
-        if event.is_group() and int(event.group_id or 0) in group_ids:
-            return True
-        return int(event.user_id or 0) in qq_ids
-    except (TypeError, ValueError):
-        return False
+    if event.is_group() and str(event.group_id or "") in group_ids:
+        return True
+    return str(event.user_id or "") in qq_ids
 
 
 class SendPayload(BaseModel):
@@ -616,11 +613,11 @@ async def send(request: Request, payload: Annotated[SendPayload, Body()]) -> dic
     if adapter is None:
         raise HTTPException(status_code=503, detail="渠道适配器尚未就绪")
     if not getattr(adapter, "is_connected", False):
-        raise HTTPException(status_code=409, detail="NapCat 未连接，无法发送")
+        raise HTTPException(status_code=409, detail="渠道未连接，无法发送")
 
     scope = "group" if payload.scope == "group" else "private"
     target = Target(
-        adapter=getattr(adapter, "name", "napcat"),
+        adapter=getattr(adapter, "name", "default"),
         scope=scope,
         target_id=str(payload.target_id),
     )

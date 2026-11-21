@@ -34,6 +34,7 @@ _GROUP_ROLE_CACHE_TTL_SECONDS = 300.0
     args_model=GetGroupSelfRoleArgs,
     category="platform",
     search_tags=["群", "权限", "身份", "管理员", "role", "permission"],
+    required_capability="group_admin",
 )
 async def get_group_self_role(args: GetGroupSelfRoleArgs, ctx: ToolContext) -> dict:
     group_id = _resolve_group_id(args.group_id, ctx)
@@ -62,6 +63,7 @@ async def get_group_self_role(args: GetGroupSelfRoleArgs, ctx: ToolContext) -> d
     args_model=SetGroupKickArgs,
     category="platform",
     search_tags=["踢人", "移出群", "kick", "群管理", "remove"],
+    required_capability="group_admin",
 )
 async def set_group_kick(args: SetGroupKickArgs, ctx: ToolContext) -> dict:
     group_id = str(args.group_id)
@@ -72,11 +74,12 @@ async def set_group_kick(args: SetGroupKickArgs, ctx: ToolContext) -> dict:
         ctx,
         "set_group_kick",
         group_id=group_id,
-        params={
-            "group_id": int(group_id),
-            "user_id": int(args.user_id),
-            "reject_add_request": bool(args.reject_add_request),
-        },
+        params={},
+        operation=lambda: ctx.adapter.group_kick(
+            group_id,
+            str(args.user_id),
+            reject_add_request=bool(args.reject_add_request),
+        ),
         brief=f"已请求将 QQ {args.user_id} 移出群 {group_id}。",
         data={
             "operation": "set_group_kick",
@@ -97,6 +100,7 @@ async def set_group_kick(args: SetGroupKickArgs, ctx: ToolContext) -> dict:
     args_model=SetGroupBanArgs,
     category="platform",
     search_tags=["禁言", "mute", "ban", "群管理", "闭嘴"],
+    required_capability="group_admin",
 )
 async def set_group_ban(args: SetGroupBanArgs, ctx: ToolContext) -> dict:
     group_id = str(args.group_id)
@@ -107,11 +111,10 @@ async def set_group_ban(args: SetGroupBanArgs, ctx: ToolContext) -> dict:
         ctx,
         "set_group_ban",
         group_id=group_id,
-        params={
-            "group_id": int(group_id),
-            "user_id": int(args.user_id),
-            "duration": int(args.duration_seconds),
-        },
+        params={},
+        operation=lambda: ctx.adapter.group_ban(
+            group_id, str(args.user_id), int(args.duration_seconds)
+        ),
         brief=f"已请求禁言 QQ {args.user_id} {args.duration_seconds} 秒。",
         data={
             "operation": "set_group_ban",
@@ -132,6 +135,7 @@ async def set_group_ban(args: SetGroupBanArgs, ctx: ToolContext) -> dict:
     args_model=SetGroupWholeBanArgs,
     category="platform",
     search_tags=["全员禁言", "全体禁言", "whole ban", "mute all"],
+    required_capability="group_admin",
 )
 async def set_group_whole_ban(args: SetGroupWholeBanArgs, ctx: ToolContext) -> dict:
     group_id = str(args.group_id)
@@ -142,7 +146,8 @@ async def set_group_whole_ban(args: SetGroupWholeBanArgs, ctx: ToolContext) -> d
         ctx,
         "set_group_whole_ban",
         group_id=group_id,
-        params={"group_id": int(group_id), "enable": bool(args.enable)},
+        params={},
+        operation=lambda: ctx.adapter.group_whole_ban(group_id, bool(args.enable)),
         brief=f"已请求{'开启' if args.enable else '关闭'}群 {group_id} 全员禁言。",
         data={
             "operation": "set_group_whole_ban",
@@ -162,6 +167,7 @@ async def set_group_whole_ban(args: SetGroupWholeBanArgs, ctx: ToolContext) -> d
     args_model=SetGroupLeaveArgs,
     category="platform",
     search_tags=["退群", "离开群", "leave", "quit"],
+    required_capability="group_admin",
 )
 async def set_group_leave(args: SetGroupLeaveArgs, ctx: ToolContext) -> dict:
     group_id = _resolve_group_id(args.group_id, ctx)
@@ -181,7 +187,8 @@ async def set_group_leave(args: SetGroupLeaveArgs, ctx: ToolContext) -> dict:
         ctx,
         "set_group_leave",
         group_id=str(group_id),
-        params={"group_id": int(group_id), "is_dismiss": False},
+        params={},
+        operation=lambda: ctx.adapter.group_leave(group_id),
         brief=f"已请求退出群 {group_id}。",
         data={
             "operation": "set_group_leave",
@@ -264,8 +271,8 @@ async def _get_group_self_role(ctx: ToolContext, group_id: str) -> dict[str, Any
     try:
         data = await ctx.adapter.call_api(
             "get_group_member_info",
-            group_id=int(group_id),
-            user_id=int(self_id),
+            group_id=_wire_id(group_id),
+            user_id=_wire_id(self_id),
             no_cache=True,
         )
     except Exception as e:
@@ -287,6 +294,12 @@ async def _get_group_self_role(ctx: ToolContext, group_id: str) -> dict[str, Any
     if isinstance(cache, dict):
         cache[cache_key] = dict(info, _checked_monotonic=now)
     return info
+
+
+def _wire_id(value: str) -> int | str:
+    """数字 ID 交给协议端时保持 int，非数字 ID 原样传字符串。"""
+    text = str(value)
+    return int(text) if text.lstrip("-").isdigit() else text
 
 
 def _resolve_self_id(ctx: ToolContext) -> str | None:
@@ -315,14 +328,18 @@ async def _call_group_admin_api(
     action: str,
     *,
     group_id: str,
-    params: dict[str, Any],
+    params: dict[str, Any] | None = None,
     brief: str,
     data: dict[str, Any],
+    operation: Any | None = None,
 ) -> dict:
     if ctx.adapter is None:
         return _failed("未连接适配器，无法执行群管理操作。")
     try:
-        raw = await ctx.adapter.call_api(action, **params)
+        if operation is not None:
+            raw = await operation()
+        else:
+            raw = await ctx.adapter.call_api(action, **(params or {}))
     except Exception as e:
         logger.warning("群管理 API 调用失败 action=%s group_id=%s: %s", action, group_id, e)
         return {

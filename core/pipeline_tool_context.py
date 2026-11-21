@@ -60,6 +60,8 @@ class PipelineToolContextMixin:
             extras["default_reply_target"] = {
                 "target_type": default_target.scope,
                 "target_id": int(raw_target_id) if raw_target_id.isdigit() else raw_target_id,
+                "thread_id": default_target.thread_id,
+                "self_id": default_target.self_id,
             }
         if latest_user_text:
             extras["latest_user_message"] = latest_user_text

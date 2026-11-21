@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from typing import Any
 
 # 导入各模块的副作用：注册装饰器把工具加入全局列表
 from . import (  # noqa: F401
@@ -465,6 +466,7 @@ def build_default_registry(
     config,
     *,
     schema_profile_override: str | None = None,
+    capabilities: Any | None = None,
 ) -> ToolRegistry:
     """根据 RootConfig 构造稳定工具 Registry。
 
@@ -517,6 +519,12 @@ def build_default_registry(
     enabled: list[ToolSpec] = []
     for spec in specs:
         if spec.name in META_TOOL_NAMES and not routed:
+            continue
+        if (
+            capabilities is not None
+            and spec.required_capability
+            and not capabilities.supports(spec.required_capability)
+        ):
             continue
         spec = replace(
             spec,

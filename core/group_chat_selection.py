@@ -16,15 +16,23 @@ GroupSelectionMode = Literal["all", "pause", "selected"]
 MAX_SELECTION_MINUTES = 1440
 
 
-def _positive_ids(values: list[int] | tuple[int, ...] | set[int] | None) -> tuple[int, ...]:
-    result: list[int] = []
+def _positive_ids(
+    values: list[int | str] | tuple[int | str, ...] | set[int | str] | None,
+) -> tuple[str, ...]:
+    """规范化群 ID 列表。
+
+    统一使用字符串，兼容 QQ 数字群号与未来非数字频道 ID。旧的整数调用方
+    仍然可以传 int，这里会无损转成字符串。
+    """
+    result: list[str] = []
     for value in values or []:
-        try:
-            number = int(value)
-        except (TypeError, ValueError):
+        text = str(value).strip()
+        if not text:
             continue
-        if number > 0 and number not in result:
-            result.append(number)
+        if text.lstrip("-").isdigit() and int(text) == 0:
+            continue
+        if text not in result:
+            result.append(text)
     return tuple(result)
 
 
@@ -33,7 +41,7 @@ class GroupChatSelection:
     """Current temporary group receive policy."""
 
     mode: GroupSelectionMode = "all"
-    group_ids: tuple[int, ...] = ()
+    group_ids: tuple[str, ...] = ()
     until: float | None = None
     reason: str = ""
     updated_at: float = field(default_factory=time.time)
@@ -51,10 +59,7 @@ class GroupChatSelection:
         if not self.is_active(now) or is_mention:
             return True
         if self.mode == "selected":
-            try:
-                return int(group_id) in self.group_ids
-            except (TypeError, ValueError):
-                return False
+            return str(group_id) in self.group_ids
         return self.mode != "pause"
 
     def snapshot(self, now: float | None = None) -> dict[str, Any]:
@@ -76,7 +81,7 @@ class GroupChatSelection:
 def build_group_chat_selection(
     *,
     mode: str,
-    group_ids: list[int] | None = None,
+    group_ids: list[int | str] | None = None,
     duration_minutes: int = 60,
     reason: str = "",
     now: float | None = None,

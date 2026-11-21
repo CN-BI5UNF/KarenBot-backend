@@ -565,14 +565,14 @@ async def get_weather(args: GetWeatherArgs, ctx: ToolContext) -> dict:
     category="feature",
     feature="tts",
     search_tags=["语音", "发语音", "TTS", "voice", "audio"],
+    required_capability="send_voice",
 )
 async def send_voice_message(args: SendVoiceMessageArgs, ctx: ToolContext) -> dict:
     if ctx.tts is None:
         return {"ok": False, "error": "未启用 TTS 语音合成"}
     if ctx.adapter is None:
         return {"ok": False, "error": "adapter 未就绪"}
-    send_voice = getattr(ctx.adapter, "send_voice", None)
-    if send_voice is None:
+    if not getattr(ctx.adapter.capabilities, "send_voice", False):
         return {"ok": False, "error": "当前适配器不支持发送语音"}
 
     try:
@@ -585,10 +585,25 @@ async def send_voice_message(args: SendVoiceMessageArgs, ctx: ToolContext) -> di
         logger.warning(f"TTS 合成失败: {e}")
         return {"ok": False, "error": f"合成失败：{e}"}
 
+    reply_target = ctx.extras.get("default_reply_target")
+    thread_id = (
+        str(reply_target.get("thread_id") or "")
+        if isinstance(reply_target, dict)
+        else ""
+    )
+    action_self_id = (
+        str(reply_target.get("self_id") or "")
+        if isinstance(reply_target, dict)
+        else ""
+    )
     target = Target(
         adapter=ctx.adapter.name,
         scope=args.target_type,
         target_id=str(args.target_id),
+        thread_id=thread_id or None,
+        self_id=str(reply_target.get("self_id") or "") or None
+        if isinstance(reply_target, dict)
+        else None,
     )
 
     if ctx.send_actions_cb is not None:
@@ -603,6 +618,8 @@ async def send_voice_message(args: SendVoiceMessageArgs, ctx: ToolContext) -> di
                     "label": f"[语音] {args.text}",
                     "delay": 0.0,
                     "audio_path": str(audio_path),
+                    "thread_id": thread_id,
+                    "self_id": action_self_id,
                 }
             ],
             "send_voice_message",
@@ -613,7 +630,7 @@ async def send_voice_message(args: SendVoiceMessageArgs, ctx: ToolContext) -> di
         )
 
     try:
-        msg_id = await send_voice(target, Path(audio_path))
+        msg_id = await ctx.adapter.send_voice(target, Path(audio_path))
         if ctx.activity_cb is not None:
             ctx.activity_cb()
     except Exception as e:

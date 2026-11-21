@@ -25,7 +25,7 @@ LEGACY_PACKAGE_NAME = "debata_agent"
 # 阶段 0 只登记当前版本占位，不在这里实现后续阶段的具体迁移。
 DEFAULT_SCHEMA_VERSIONS: dict[str, int] = {
     "config": 1,
-    "root": 2,
+    "root": 3,
     "instance": 1,
     "secrets": 1,
     "karen_db": 1,

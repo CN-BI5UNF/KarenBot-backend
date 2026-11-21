@@ -40,7 +40,7 @@ def _positive_ids(values: Iterable[int] | None) -> tuple[int, ...]:
             number = int(value)
         except (TypeError, ValueError):
             continue
-        if number > 0 and number not in result:
+        if number != 0 and number not in result:
             result.append(number)
     return tuple(result)
 

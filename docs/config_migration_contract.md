@@ -2,7 +2,7 @@
 
 ## 当前版本
 
-- 当前配置版本：`CURRENT_CONFIG_VERSION = 2`
+- 当前配置版本：`CURRENT_CONFIG_VERSION = 3`
 - 稳定 API：`app_config.CURRENT_CONFIG_VERSION`、`app_config.migrate_config`、`app_config.ConfigMigrationReport`
 - `load_config(paths, set_global=True)` 的公共返回值始终是 `RootConfig`，不会返回原始 `dict`。
 
@@ -11,10 +11,13 @@
 | 迁移 ID | 来源版本 | 目标版本 | 入口 |
 | --- | --- | --- | --- |
 | `config.v1_to_v2` | `1` | `2` | `migrate_config(raw)` |
+| `config.v2_to_v3` | `2` | `3` | `migrate_config(raw)` |
 
 `migrate_config` 只处理纯 `dict` 数据，不读写文件。文件备份、写回和日志由 loader 负责。
 
 `config.v1_to_v2` 仍然表示版本链从 v1 升级到 v2 的迁移步骤；4.5 历史键规范化不是只依赖版本号的步骤，会在所有非未来版本配置上执行。因此 `version: 2` 但仍含 4.5 旧键的配置也会被规范化、报告 `changed=True`，并由 loader 在校验成功后备份和写回。`version: 2` 且不含旧键的配置不会因此产生假变更。
+
+`config.v2_to_v3` 把旧的 NapCat 专用进程托管迁移到 `programs`：`manage_process` / `process_path` / `process_args` / `auto_restart` / `process_warmup_seconds` 会被删除，生成 `napcat_<adapter>` 程序条目（可执行文件、参数、探测端口、自动重启、启动等待）。旧字段不再被 schema 接受；对勾选了托管但路径为空的配置只保留 warning，不生成程序。
 
 ## 历史键映射表
 
@@ -29,6 +32,11 @@
 | `agents.<id>.first_token_timeout` | `agents.<id>.first_token_timeout_seconds` | 重命名 |
 | `adapters.<id>.whitelist.mode = all` | `open` | 值规范化 |
 | 历史 OpenAI 兼容 provider protocol | `openai_compat` | 值规范化 |
+| `adapters.<id>.manage_process` | `programs.napcat_<id>` | 重命名（启用托管时） |
+| `adapters.<id>.process_path` | `programs.napcat_<id>.executable` | 重命名（启用托管时） |
+| `adapters.<id>.process_args` | `programs.napcat_<id>.args` | 重命名（启用托管时） |
+| `adapters.<id>.auto_restart` | `programs.napcat_<id>.auto_restart` | 重命名（启用托管时） |
+| `adapters.<id>.process_warmup_seconds` | `programs.napcat_<id>.startup_wait_seconds` | 重命名（启用托管时） |
 
 ## 废弃字段
 

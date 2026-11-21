@@ -112,11 +112,23 @@ async def patch_setting(
         # Hot fields merge in place so live components see them.  Restart-only
         # fields replace top-level sections so the running components keep
         # their old references until the Runtime actually restarts.
-        apply_validated(
-            cfg,
-            lambda draft: set_path_in(draft, payload.path, value),
-            in_place=in_place,
-        )
+        def _apply_patch(draft: Any) -> None:
+            set_path_in(draft, payload.path, value)
+            # 旧前端只写 mode；setattr 不会触发 model_validator，这里显式同步
+            # transport，避免“看起来改成 server，实际仍是 ws_client”。
+            if (
+                payload.path.startswith("adapters.")
+                and payload.path.endswith(".mode")
+                and str(value) in {"client", "server"}
+            ):
+                prefix = payload.path[: -len("mode")]
+                set_path_in(
+                    draft,
+                    f"{prefix}transport",
+                    "ws_server" if value == "server" else "ws_client",
+                )
+
+        apply_validated(cfg, _apply_patch, in_place=in_place)
     except ValidationError as e:
         raise HTTPException(
             status_code=400, detail=f"设置值不合法：{user_error_text(e)}"
@@ -789,9 +801,15 @@ async def put_secret(
         for item in (rt.config.providers or {}).values()
     ):
         reload_llm = True
-    for adapter_cfg in (rt.config.adapters or {}).values():
-        if getattr(adapter_cfg, "access_token_id", None) == key_id:
-            hot_paths.add("adapters.default.access_token_id")
+    for adapter_name, adapter_cfg in (rt.config.adapters or {}).items():
+        for field_name in (
+            "access_token_id",
+            "webhook_secret_id",
+            "bot_token_id",
+            "webhook_secret_token_id",
+        ):
+            if getattr(adapter_cfg, field_name, None) == key_id:
+                hot_paths.add(f"adapters.{adapter_name}.{field_name}")
     if getattr(rt.config.features.vision, "api_key_id", None) == key_id:
         hot_paths.add("features.vision.enabled")
     if getattr(rt.config.features.weather, "api_key_id", None) == key_id:
@@ -841,8 +859,8 @@ async def put_secret(
 
 class BlacklistPayload(BaseModel):
     enabled: bool = True
-    qq_ids: list[int] = Field(default_factory=list)
-    group_ids: list[int] = Field(default_factory=list)
+    qq_ids: list[int | str] = Field(default_factory=list)
+    group_ids: list[int | str] = Field(default_factory=list)
 
 
 def _blacklist_cfg(rt: Any) -> Any:
@@ -867,14 +885,23 @@ def _adapter_cfg(rt: Any) -> Any:
     return next(iter(adapters.values()))
 
 
-def _positive_ids(values: list[int]) -> list[int]:
-    return sorted({int(value) for value in values if int(value) > 0})
+def _positive_ids(values: list[int | str]) -> list[str]:
+    """规范化 ID 列表；统一字符串以兼容非数字平台。"""
+    result: set[str] = set()
+    for value in values:
+        text = str(value).strip()
+        if not text:
+            continue
+        if text.lstrip("-").isdigit() and int(text) == 0:
+            continue
+        result.add(text)
+    return sorted(result)
 
 
 class WhitelistPayload(BaseModel):
     mode: Literal["open", "verify", "whitelist"] = "verify"
-    qq_ids: list[int] = Field(default_factory=list)
-    group_ids: list[int] = Field(default_factory=list)
+    qq_ids: list[int | str] = Field(default_factory=list)
+    group_ids: list[int | str] = Field(default_factory=list)
 
 
 class ListsPayload(BaseModel):
@@ -1060,8 +1087,8 @@ async def put_blacklist(
     host = request.app.state.host
     cfg = _blacklist_cfg(rt)
     cfg.enabled = payload.enabled
-    cfg.qq_ids = sorted({int(x) for x in payload.qq_ids})
-    cfg.group_ids = sorted({int(x) for x in payload.group_ids})
+    cfg.qq_ids = _positive_ids(payload.qq_ids)
+    cfg.group_ids = _positive_ids(payload.group_ids)
 
     await asyncio.to_thread(host.save_config)
     _apply_blacklist_hot(rt)

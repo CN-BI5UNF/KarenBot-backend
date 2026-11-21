@@ -50,6 +50,8 @@ class RuntimeHost:
         self._restart_lock = asyncio.Lock()
         # 启动过程中产生的非致命问题（密钥缺失、feature 加载失败等）
         self.warnings: list[str] = []
+        # 由本 host 持有的外部程序管理器；跨 Runtime 重启保留进程句柄。
+        self.programs: Any = None
         self._stop_requested = False
         # 危险数据操作期间挡住其它启动/重启入口，避免删除时 Runtime
         # 被另一个请求拉起来并重新打开 SQLite。
@@ -219,19 +221,43 @@ class RuntimeHost:
             self.started_at = time.time()
             self._collect_warnings()
             logger.info("Runtime 已就绪（persona=%s）", getattr(rt.persona, "name", "?"))
+            await self._start_programs(rt)
             return True
+
+    async def _start_programs(self, rt: Any) -> None:
+        """启动用户自定义外部程序；任何失败都不能影响 Runtime。"""
+        try:
+            from core.programs import ExternalProgramManager
+
+            if self.programs is None:
+                self.programs = ExternalProgramManager(self.project_root)
+            await self.programs.start_all(getattr(rt.config, "programs", {}) or {})
+        except Exception:  # noqa: BLE001
+            logger.exception("外部程序管理器启动失败（不影响 Runtime）")
+
+    async def _stop_programs(self) -> None:
+        if self.programs is None:
+            return
+        try:
+            await self.programs.stop_all()
+        except Exception:  # noqa: BLE001
+            logger.exception("外部程序清理失败")
 
     async def stop(self) -> None:
         async with self._lock:
             rt = self.rt
             self.rt = None
             self.state = STATE_STOPPED
-            if rt is None:
-                return
             try:
-                await rt.shutdown()
-            except Exception:  # noqa: BLE001
-                logger.exception("Runtime 关闭失败")
+                # 先按 stop_with_karen 策略清理外部程序：Runtime 关闭可能
+                # 因适配器/网络收尾卡住，不能让它拖住“随 KarenBot 关闭”。
+                await self._stop_programs()
+            finally:
+                if rt is not None:
+                    try:
+                        await rt.shutdown()
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Runtime 关闭失败")
 
     async def restart(self) -> bool:
         """原地重启（改完需要重启的配置后调用）。"""
@@ -383,6 +409,9 @@ class RuntimeHost:
             "adapter": None,
             "persona": "",
             "persona_id": "",
+            "programs": (
+                self.programs.status() if self.programs is not None else []
+            ),
         }
         if rt is None:
             return info
@@ -390,18 +419,24 @@ class RuntimeHost:
         cfg = getattr(rt, "config", None)
         if cfg is not None:
             info["persona_id"] = cfg.persona.active
-            try:
-                name, adapter_cfg = next(iter(cfg.adapters.items()))
+            adapters = [
+                (name, adapter_cfg)
+                for name, adapter_cfg in cfg.adapters.items()
+                if getattr(adapter_cfg, "enabled", True)
+            ] or list(cfg.adapters.items())
+            if adapters:
+                name, adapter_cfg = adapters[0]
                 info["adapter"] = {
                     "name": name,
-                    "mode": adapter_cfg.mode,
-                    "host": adapter_cfg.host,
-                    "port": adapter_cfg.port,
-                    "path": adapter_cfg.path,
-                    "enabled": adapter_cfg.enabled,
+                    "type": getattr(adapter_cfg, "type", ""),
+                    "transport": getattr(adapter_cfg, "transport", None),
+                    "dialect": getattr(adapter_cfg, "dialect", None),
+                    "mode": getattr(adapter_cfg, "mode", None),
+                    "host": getattr(adapter_cfg, "host", None),
+                    "port": getattr(adapter_cfg, "port", None),
+                    "path": getattr(adapter_cfg, "path", None),
+                    "enabled": getattr(adapter_cfg, "enabled", True),
                 }
-            except StopIteration:
-                pass
         persona = getattr(rt, "persona", None)
         if persona is not None:
             info["persona"] = getattr(persona, "name", "") or info["persona_id"]
@@ -600,8 +635,8 @@ class RuntimeHost:
             # 名单以前被前端写死成空数组——选了 whitelist 却没有名单 = 谁都进不来
             whitelist = WhitelistConfig(
                 mode=whitelist_in.get("mode") or "verify",
-                qq_ids=_int_list(whitelist_in.get("qq_ids")),
-                group_ids=_int_list(whitelist_in.get("group_ids")),
+                qq_ids=_str_list(whitelist_in.get("qq_ids")),
+                group_ids=_str_list(whitelist_in.get("group_ids")),
             )
         adapter = NapCatAdapterConfig(
             enabled=bool(adapter_in.get("enabled", True)),
@@ -609,9 +644,6 @@ class RuntimeHost:
             host=adapter_in.get("host") or "127.0.0.1",
             port=int(adapter_in.get("port") or 3000),
             path=adapter_in.get("path") or "/",
-            manage_process=bool(adapter_in.get("manage_process", False)),
-            process_path=str(adapter_in.get("process_path") or ""),
-            auto_restart=bool(adapter_in.get("auto_restart", True)),
             whitelist=whitelist,
         )
         token = (adapter_in.get("access_token") or "").strip()
@@ -676,6 +708,8 @@ class RuntimeHost:
             behavior=BehaviorConfig(**_behavior_overrides(payload.get("behavior") or {})),
             persona=PersonaConfig(active=payload.get("persona") or "大肥鱼"),
             adapters={"default": adapter},
+            # 重跑首次配置只重置渠道/模型；用户配置的外部程序必须保留。
+            programs=existing.programs if existing is not None else {},
         )
 
         # 写盘前跑一次完整校验：Agent/视觉引用不存在的 provider 这类错误
@@ -743,18 +777,18 @@ def _stash_persona_brief(paths: Any, brief: Any) -> None:
         logger.warning("暂存角色描述失败（不影响配置写入）", exc_info=True)
 
 
-def _int_list(value: Any) -> list[int]:
-    """把向导传来的名单统一成 int 列表。
+def _str_list(value: Any) -> list[str]:
+    """把向导传来的名单统一成字符串列表。
 
     前端可能是 ``[123, 456]``、``"123,456"`` 或 ``"123\\n456"``（用户从别处粘贴），
-    三种都要认；空值给空列表。
+    三种都要认；空值给空列表。使用字符串是为了兼容非数字平台 ID。
     """
     if value in (None, ""):
         return []
     if isinstance(value, str):
         parts = re.split(r"[,\s，、]+", value)
-        return [int(p) for p in parts if p.strip()]
-    return [int(x) for x in value]
+        return [str(p).strip() for p in parts if str(p).strip()]
+    return [str(x).strip() for x in value if str(x).strip()]
 
 
 def _build_features(payload: dict[str, Any], container_cls: Any, section_classes: dict[str, Any]):

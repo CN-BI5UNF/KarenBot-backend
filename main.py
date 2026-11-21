@@ -197,15 +197,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def run_headless(project_root: Path, config_file: Path | None = None) -> None:
-    """无界面模式：直接跑 Runtime。"""
+    """无界面模式：直接跑 Runtime，并按配置托管外部程序。"""
     from core import Runtime
+    from core.programs import ExternalProgramManager
 
     rt = Runtime(project_root=project_root, config_file=config_file)
+    programs = ExternalProgramManager(project_root)
     try:
         await rt.start()
+        await programs.start_all(getattr(rt.config, "programs", {}) or {})
         await rt.wait_until_stop()
     finally:
-        await rt.shutdown()
+        try:
+            await rt.shutdown()
+        finally:
+            await programs.stop_all()
 
 
 # ============================================================
