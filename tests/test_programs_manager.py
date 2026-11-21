@@ -80,7 +80,12 @@ async def test_stop_with_karen_false_leaves_process_running() -> None:
 
 
 async def test_probe_skips_launch_and_never_stops_external() -> None:
-    server = await asyncio.start_server(lambda _r, _w: None, "127.0.0.1", 0)
+    def _close(
+        _reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        writer.close()
+
+    server = await asyncio.start_server(_close, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     manager = ExternalProgramManager(".", graceful_shutdown_timeout=1.0)
     cfg = ExternalProgramConfig(
