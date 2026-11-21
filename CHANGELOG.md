@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.0.0-alpha — 2026-11-21
+
+KarenBot 统一发行版首个 v2 alpha。后端、GUI、WebUI 版本统一为 `v2.0.0-alpha`，正式安装/更新入口为 `CN-BI5UNF/KarenBot` 主仓库。
+
+- 三组件并入 KarenBot 主仓库的 `modules/` submodule；KarenBot Release 统一提供 `modules.json` + 三个组件资产。
+- 更新器从 KarenBot 统一 Release 读取并校验资产，后端与当前前端必须一起更新。
+- 从 0.1.x 升级必须先安装过渡版：后端 `v0.1.11-alpha.1`、GUI/WebUI `v0.1.1-alpha.2`。
+- 组件仓库的 v2 Release 仅供源码回溯；旧 1.0.x 绑定版本不再支持。
+
 ## v0.1.11-alpha.1 — 2026-11-21
 
 过渡版本：后端模块 `0.1.11-alpha.1`，应用代码 `1.0.11-alpha.1`。升级后更新源切换为 `CN-BI5UNF/KarenBot` 的**统一发行版**；请在本版本更新页手动选择 `v2.0.0-alpha`。

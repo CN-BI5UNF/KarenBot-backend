@@ -84,10 +84,9 @@ v2 起安装器从 `CN-BI5UNF/KarenBot` 的统一 Release 下载 `modules.json`�
 
 | 项目 | 版本 |
 |---|---|
-| 本仓库发布版本 | `v0.1.11-alpha.1` |
-| 应用代码版本 | `1.0.11-alpha.1` |
-| 配套界面模块 | `v0.1.1-alpha.2` |
-| v2 统一发行版 | `v2.0.0-alpha`（升级后手动选择） |
+| v2 统一发行版 | `v2.0.0-alpha` |
+| 应用代码版本 | `2.0.0-alpha` |
+| 过渡版 | 后端 `v0.1.11-alpha.1` / 前端 `v0.1.1-alpha.2` |
 
 `VERSION` 是模块发布版本，`backend/__init__.py` 中的代码版本沿用应用兼容版本。
 过渡版本发布后，更新源切换为 KarenBot 主仓库的统一发行版；v2 组件 tag/Release
