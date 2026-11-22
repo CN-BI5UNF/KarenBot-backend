@@ -126,9 +126,21 @@ def create_control_app(
         public_prefixes=public_prefixes,
         auth_error_message=auth_error_message,
     )
+    _install_auth_cache_headers(app)
     if enable_websocket:
         _install_websocket_events(app)
     return app
+
+
+def _install_auth_cache_headers(app: FastAPI) -> None:
+    """登录/登出响应不能被浏览器或中间缓存复用。"""
+
+    @app.middleware("http")
+    async def auth_no_store(request, call_next):  # type: ignore[no-untyped-def]
+        response = await call_next(request)
+        if request.url.path.startswith("/api/auth/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
 
 async def _boot(host: RuntimeHost, hub: EventHub) -> None:

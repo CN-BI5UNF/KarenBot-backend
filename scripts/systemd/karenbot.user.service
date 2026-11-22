@@ -27,7 +27,9 @@ StartLimitBurst=5
 Type=simple
 WorkingDirectory=%h/KarenBot
 # 默认同时启动 WebUI 和 QQ Runtime；只跑 headless Runtime 时改成 --no-gui。
-ExecStart=%h/KarenBot/.venv/bin/python %h/KarenBot/main.py --host 0.0.0.0 --port 8000
+# WebUI 默认只监听 127.0.0.1；需要局域网访问时在 config.yaml 设置
+# webui.allow_lan: true（设置页「网络」分组），或在这里显式加 --host 0.0.0.0。
+ExecStart=%h/KarenBot/.venv/bin/python %h/KarenBot/main.py --port 8000
 Environment=PYTHONUNBUFFERED=1
 # 可选：把 KAREN_DATA_ROOT、代理等环境变量放在这里（chmod 600）。
 EnvironmentFile=-%h/.config/karenbot.env

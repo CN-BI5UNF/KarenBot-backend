@@ -66,7 +66,7 @@ uv sync
 uv run python main.py
 ```
 
-The WebUI listens on `0.0.0.0:8000` by default. Use `--host 127.0.0.1` for local-only access. The terminal prints the WebUI token; the first launch opens the setup wizard.
+The WebUI listens on `127.0.0.1:8000` by default. To expose it to the LAN, enable "Allow LAN access" under Settings → Network and restart the WebUI, set `webui.allow_lan: true` in `config.yaml`, or pass `--host 0.0.0.0` explicitly (the CLI flag overrides the config). The terminal prints the WebUI token; the first launch opens the setup wizard.
 
 Normal launches check the base dependencies declared in `pyproject.toml` before importing the app. Missing or out-of-range packages are installed editable with the running interpreter (`uv pip install --python <interpreter> -e .`, falling back to pip). Optional extras and local-model dependencies are never installed implicitly. Set `KAREN_DISABLE_DEPENDENCY_CHECK=1` to skip the check or `KAREN_DISABLE_DEPENDENCY_INSTALL=1` to check without installing.
 

@@ -386,7 +386,9 @@ journalctl --user -u karenbot -n 120 --no-pager | grep -A 12 'WebUI 已启动'
 ## 8. 安全建议
 
 - **不要用 root 跑长期服务**。个人设备用用户服务；服务器用专用账号。
-- WebUI 默认监听 `0.0.0.0:8000`。只在本机使用时改成 `--host 127.0.0.1`；
+- WebUI 默认只监听 `127.0.0.1:8000`。需要局域网访问时，在设置页
+  「网络」打开“允许暴露在局域网中”，或在 `config.yaml` 设置
+  `webui.allow_lan: true`，或显式传 `--host 0.0.0.0`；
   需要公网访问时放在 Nginx/Caddy 反向代理和 HTTPS 后面。
 - `--no-auth` 只适合完全可信的内网。关掉鉴权后，任何能访问端口的人都能看聊天记录、改配置。
 - `~/.config/karenbot.env`（如果使用）建议 `chmod 600`。

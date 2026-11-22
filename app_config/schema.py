@@ -2209,6 +2209,18 @@ class BackupConfig(StrictModel):
     """是否包含 workspace/incoming 中的入站图片/视频。"""
 
 
+class WebUIConfig(StrictModel):
+    """WebUI 浏览器控制台的监听设置。"""
+
+    allow_lan: bool = False
+    """是否允许局域网内其它设备访问 WebUI。
+
+    关闭时只监听 127.0.0.1；开启后监听 0.0.0.0。无论是否开启都仍要求访问令牌。
+    该设置只在 WebUI 服务启动时读取，修改后需要重启 WebUI 服务；启动命令里
+    显式传入的 ``--host`` 优先于本设置。
+    """
+
+
 # ============================================================
 # 根配置
 # ============================================================
@@ -2234,6 +2246,7 @@ class RootConfig(StrictModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     update: UpdateConfig = Field(default_factory=UpdateConfig)
     backup: BackupConfig = Field(default_factory=BackupConfig)
+    webui: WebUIConfig = Field(default_factory=WebUIConfig)
 
     @field_validator("version")
     @classmethod

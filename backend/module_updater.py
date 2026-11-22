@@ -69,6 +69,18 @@ MODULE_REPOS = {
 MODULE_DIRS = {"backend": "backend", "gui": "gui", "webui": "webui"}
 MODULE_LABELS = {"backend": "后端", "gui": "GUI 前端", "webui": "WebUI 前端"}
 
+# 安装器创建的 Linux 桌面入口。旧版安装器使用 Icon=applications-system，
+# 新版改为 Icon=karenbot + hicolor 图标；更新后顺手把旧入口修好。
+DESKTOP_SHORTCUT_NAMES = (
+    "karenbot-gui.desktop",
+    "karenbot-gui-safe.desktop",
+    "karenbot-webui.desktop",
+)
+DESKTOP_ICON_NAME = "karenbot.svg"
+LEGACY_DESKTOP_ICONS = frozenset(
+    {"", "applications-system", "applications-other", "system"}
+)
+
 # KarenBot-backend 发布包包含完整后端程序。更新时只覆盖这些程序条目，
 # 其余顶层条目一律保留（用户数据、人格、配置、插件、备份等）。
 BACKEND_UPDATE_ENTRIES = (
@@ -733,6 +745,145 @@ class GitHubClient:
                     "module_manifest_invalid",
                     f"读取 {name} 失败：{exc}",
                 ) from None
+
+
+def _desktop_data_homes(home: Path | None = None) -> list[Path]:
+    """扫描安装器可能写入的 XDG data 根目录。
+
+    安装器历史版本固定写 ``~/.local/share``，不读 ``XDG_DATA_HOME``；
+    为了两代安装器都能覆盖，这里同时检查标准位置和环境变量指定的位置。
+    """
+    base = Path(home) if home is not None else Path.home()
+    homes = [base / ".local" / "share"]
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        candidate = Path(xdg).expanduser()
+        if candidate not in homes:
+            homes.insert(0, candidate)
+    return homes
+
+
+def _desktop_icon_source(project_root: Path) -> Path | None:
+    """优先用当前 WebUI 的图标，GUI-only 安装回退到 backend 打包图标。"""
+    candidates = (
+        Path(project_root) / "webui" / "static" / "favicon.svg",
+        Path(project_root) / "packaging" / "karenbot.svg",
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def _desktop_icon_value(text: str) -> str | None:
+    match = re.search(r"(?m)^Icon\s*=\s*(.*)$", text)
+    if match is None:
+        return None
+    return match.group(1).strip()
+
+
+def _desktop_with_icon(text: str, icon: str) -> str:
+    match = re.search(r"(?m)^Icon\s*=\s*.*$", text)
+    if match is not None:
+        return text[: match.start()] + f"Icon={icon}" + text[match.end() :]
+    match = re.search(r"(?m)^Exec\s*=\s*.*$", text)
+    if match is not None:
+        return text[: match.end()] + f"\nIcon={icon}" + text[match.end() :]
+    return text.replace("[Desktop Entry]", f"[Desktop Entry]\nIcon={icon}", 1)
+
+
+def _is_karenbot_desktop_entry(text: str) -> bool:
+    """只处理安装器写出的条目，避免误改用户自定义的同名文件。"""
+    if "[Desktop Entry]" not in text:
+        return False
+    return re.search(r"(?m)^Name(?:\[[^\]]+\])?\s*=\s*KarenBot", text) is not None
+
+
+def _ensure_desktop_icon(source: Path, target: Path) -> bool:
+    """把图标写到 hicolor 主题；返回是否发生了写入。"""
+    if target.is_symlink():
+        logger.warning("桌面图标目标是符号链接，跳过写入：%s", target)
+        return False
+    try:
+        payload = source.read_bytes()
+        if target.is_file() and target.read_bytes() == payload:
+            return False
+    except OSError as exc:
+        logger.warning("读取桌面图标失败 %s：%s", source, exc)
+        return False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_name(target.name + ".tmp")
+        temp.write_bytes(payload)
+        temp.chmod(0o644)
+        os.replace(temp, target)
+        return True
+    except OSError as exc:
+        logger.warning("写入桌面图标失败 %s：%s", target, exc)
+        return False
+
+
+def repair_desktop_shortcut_icons(project_root: Path) -> dict[str, Any]:
+    """更新后修复安装器创建的 Linux 桌面快捷方式图标。
+
+    只改 ``Icon=applications-system`` 这类旧版安装器留下的值；用户自定义的
+    图标名或绝对路径保持不变。快捷方式必须同时满足安装器生成的文件名和
+    ``Name=KarenBot...``，避免误伤同名文件。
+    """
+    source = _desktop_icon_source(Path(project_root))
+    result: dict[str, Any] = {"changed": [], "icons": [], "skipped": ""}
+    if source is None:
+        result["skipped"] = "icon_missing"
+        return result
+
+    for data_home in _desktop_data_homes():
+        applications = data_home / "applications"
+        icon_target = (
+            data_home
+            / "icons"
+            / "hicolor"
+            / "scalable"
+            / "apps"
+            / DESKTOP_ICON_NAME
+        )
+        for name in DESKTOP_SHORTCUT_NAMES:
+            path = applications / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                logger.warning("读取桌面快捷方式失败 %s：%s", path, exc)
+                continue
+            if not _is_karenbot_desktop_entry(text):
+                continue
+            current = _desktop_icon_value(text)
+            if current == "karenbot":
+                if _ensure_desktop_icon(source, icon_target):
+                    result["icons"].append(str(icon_target))
+                continue
+            if current is not None and current not in LEGACY_DESKTOP_ICONS:
+                # 用户自定义的图标（绝对路径或主题图标名）不覆盖。
+                continue
+            # 先确保图标就位，再改快捷方式；图标写不进去就保留旧值，
+            # 避免把快捷方式改成指向一个不存在的 karenbot 图标。
+            _ensure_desktop_icon(source, icon_target)
+            if not icon_target.is_file():
+                continue
+            updated = _desktop_with_icon(text, "karenbot")
+            try:
+                mode = path.stat().st_mode & 0o777
+                temp = path.with_name(path.name + ".tmp")
+                temp.write_text(updated, encoding="utf-8")
+                temp.chmod(mode)
+                os.replace(temp, path)
+            except OSError as exc:
+                logger.warning("修复桌面快捷方式失败 %s：%s", path, exc)
+                continue
+            result["changed"].append(str(path))
+            if str(icon_target) not in result["icons"]:
+                result["icons"].append(str(icon_target))
+    return result
 
 
 @dataclass
@@ -1690,6 +1841,7 @@ class ModuleUpdateService:
             "backup_dir": result["backup_dir"],
             "files": result.get("files") or {},
             "frontend_files": result.get("frontend_files") or {},
+            "shortcut_icons": result.get("shortcut_icons") or {},
             "preserved_entries": (
                 (result.get("files") or {}).get("preserved_entries") or []
             ),
@@ -1924,6 +2076,12 @@ class ModuleUpdateService:
 
         backend_stats = component_stats.get("backend", {})
         frontend_stats = component_stats.get(frontend_component, {})
+        # 图标修复是外观动作，失败不能影响已经成功的代码更新。
+        try:
+            shortcut_repair = repair_desktop_shortcut_icons(self.project_root)
+        except Exception:  # noqa: BLE001
+            logger.exception("更新后修复桌面快捷方式图标失败")
+            shortcut_repair = {"changed": [], "icons": [], "skipped": "error"}
         messages = [
             self._applied_message(component, stats)
             for component, stats in component_stats.items()
@@ -1934,6 +2092,12 @@ class ModuleUpdateService:
                 messages.append("GUI 前端文件已更新，需完全退出并重新打开应用")
             else:
                 messages.append("WebUI 文件已更新，刷新浏览器页面后生效")
+        if shortcut_repair.get("changed"):
+            messages.append(
+                f"已修复 {len(shortcut_repair['changed'])} 个桌面快捷方式的旧图标"
+            )
+        elif shortcut_repair.get("icons"):
+            messages.append("已补齐桌面快捷方式图标")
         return {
             "message": "；".join(messages) + "。",
             "updated": applied,
@@ -1958,6 +2122,7 @@ class ModuleUpdateService:
             "backup_dir": str(backup_root),
             "files": backend_stats,
             "frontend_files": frontend_stats,
+            "shortcut_icons": shortcut_repair,
             "components": {
                 component: self._installed(component)
                 for component in ("backend", frontend_component)

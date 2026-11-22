@@ -24,7 +24,7 @@ PYTHON="$PROJECT_ROOT/.venv/bin/python"
 HEADLESS=0
 DRY_RUN=0
 WRITE_ONLY=0
-HOST="0.0.0.0"
+HOST=""
 PORT="8000"
 EXTRA_ARGS=()
 
@@ -33,7 +33,7 @@ usage() {
 用法: bash scripts/install_systemd_user.sh [选项]
 
   --headless       只跑 headless Runtime（不启动 WebUI）
-  --host HOST      WebUI 监听地址（默认 0.0.0.0）
+  --host HOST      WebUI 监听地址（默认按 config.yaml 的 webui.allow_lan）
   --port PORT      WebUI 端口（默认 8000）
   --no-auth        关闭 WebUI 鉴权（仅完全可信内网）
   --dry-run        只打印生成的 unit，不写入、不启动
@@ -116,7 +116,11 @@ EXEC_ARGS=()
 if [[ "$HEADLESS" -eq 1 ]]; then
     EXEC_ARGS+=("--no-gui")
 else
-    EXEC_ARGS+=("--host" "$HOST" "--port" "$PORT")
+    EXEC_ARGS+=("--port" "$PORT")
+    # 不传 --host 时由 config.yaml 的 webui.allow_lan 决定（默认仅本机）。
+    if [[ -n "$HOST" ]]; then
+        EXEC_ARGS+=("--host" "$HOST")
+    fi
 fi
 EXEC_ARGS+=("${EXTRA_ARGS[@]}")
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
 import sys
 from typing import Annotated, Any
@@ -23,6 +24,11 @@ router = APIRouter(tags=["system"])
 
 COOKIE_MAX_AGE = SESSION_TTL_SECONDS
 BACKEND_RESTART_DELAY_SECONDS = 1.0
+
+
+def _secure_cookie_forced() -> bool:
+    value = os.environ.get("KAREN_WEBUI_SECURE_COOKIE", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _ensure_no_admin_operation(host: Any) -> None:
@@ -67,6 +73,9 @@ async def login(
     if not auth.token_matches(payload.token.strip()):
         raise HTTPException(status_code=401, detail="令牌不正确")
     sid = auth.new_session()
+    # HTTP 下不能无条件加 Secure，否则浏览器不会回传 Cookie、登录直接坏掉；
+    # HTTPS（或反向代理已正确处理 X-Forwarded-Proto）时才启用。
+    secure = request.url.scheme == "https" or _secure_cookie_forced()
     response.set_cookie(
         COOKIE_NAME,
         sid,
@@ -74,6 +83,7 @@ async def login(
         httponly=True,
         samesite="lax",
         path="/",
+        secure=secure,
     )
     return {"ok": True, "message": "登录成功"}
 

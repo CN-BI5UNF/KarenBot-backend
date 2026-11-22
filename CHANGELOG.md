@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.0.1-alpha — 2026-11-22
+
+WebUI 默认收紧到本机并新增局域网开关；更新时修复旧安装器的快捷方式图标；工具档位移到容器 Agent 模式。
+
+### WebUI 安全默认值
+
+- `main.py` / `webui_server.py` 默认只监听 `127.0.0.1`；新增 `webui.allow_lan` 配置，可在 WebUI 设置页「网络」开启局域网访问，修改后需重启 WebUI 服务。
+- 启动命令显式传入的 `--host` 仍优先于配置；非回环监听时启动横幅打印风险提示。
+- 登录 Cookie 在 HTTPS 或 `KAREN_WEBUI_SECURE_COOKIE=1` 时带 `Secure`；`/api/auth/*` 响应带 `Cache-Control: no-store`。
+- 更新 WebUI/GUI 后自动修复旧安装器创建的桌面快捷方式图标（`applications-system` → `karenbot`），并把 SVG 写入 hicolor 图标目录。
+- `behavior.tool_schema_profile` 的控件移到容器页 Agent 模式；字段声明保留并从设置页隐藏，保存后热重建工具注册表。
+
 ## v2.0.0-alpha.1 — 2026-11-21
 
 修复统一发行版只能整体更新、WebUI 无法单独更新前端的问题。

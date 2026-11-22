@@ -138,7 +138,10 @@ SETTINGS_GROUPS: list[Section] = [
     {
         "key": "behavior",
         "title": "软件行为",
-        "desc": "消息合并、主动思考、限流与外观。",
+        "desc": (
+            "消息合并、主动思考、限流与外观。"
+            "工具 schema 档位已移到「容器 → Agent 模式」。"
+        ),
         "fields": [
             {"path": "behavior.merge_window_seconds", "label": "消息合并窗口（秒）",
              "type": "float", "default": 0.5, "needs_restart": True,
@@ -151,8 +154,11 @@ SETTINGS_GROUPS: list[Section] = [
              "type": "float", "default": 600.0, "needs_restart": True},
             {"path": "behavior.proactive_context_token_budget", "label": "主动思考上下文预算",
              "type": "int", "default": 4096, "needs_restart": True},
+            # 控件已移到「容器 → Agent 模式」卡片；这里保留声明供 API 读写，
+            # 但不在设置页重复展示。
             {"path": "behavior.tool_schema_profile",
              "label": "工具 schema 档位", "type": "enum", "default": "compact",
+             "hidden": True,
              "options": [["compact", "compact（默认，省 token）"],
                          ["full", "full（完整 schema，排查用）"],
                          ["routed", "routed（工具集路由，实验）"],
@@ -179,8 +185,8 @@ SETTINGS_GROUPS: list[Section] = [
              "needs_restart": True,
              "help": "档位决定每轮工具 schema 如何暴露，不影响工具本身是否已注册；"
                      "宽任务、需要整组工具时选 routed；编码或只需要少数精确工具时选 agent。"
-                     "人格进入工作模式时会临时切到 agent，退出后恢复此档位，不需要重启；"
-                     "手动修改此档位仍需重启 Runtime。"},
+                     "人格进入工作模式时会临时切到 agent，退出后恢复此档位。"
+                     "保存后会立即热重建工具注册表，不需要重启 Runtime。"},
             {"path": "behavior.pending_request_timeout_seconds", "label": "待处理请求超时（秒）",
              "type": "float", "default": 1800.0, "needs_restart": True},
             {"path": "behavior.rate_limit.enabled", "label": "启用陌生人限流",
@@ -196,6 +202,20 @@ SETTINGS_GROUPS: list[Section] = [
              "options": [["DEBUG", "DEBUG"], ["INFO", "INFO"],
                          ["WARNING", "WARNING"], ["ERROR", "ERROR"]],
              "default": "INFO", "needs_restart": False, "hot_apply": "log_level"},
+        ],
+    },
+    {
+        "key": "network",
+        "title": "网络",
+        "desc": "WebUI 监听与局域网访问。修改后需要重启 WebUI 服务。",
+        "frontends": ["webui"],
+        "fields": [
+            {"path": "webui.allow_lan", "label": "允许暴露在局域网中",
+             "type": "bool", "default": False, "needs_restart": True,
+             "restart_scope": "webui",
+             "help": "关闭时只监听 127.0.0.1；开启后同一局域网的手机/平板"
+                     "可以通过本机 IP 访问。仍然需要访问令牌，请只在可信网络中开启。"
+                     "如果启动命令显式传了 --host，以命令行为准。"},
         ],
     },
     {
@@ -804,8 +824,11 @@ def field_needs_restart(field: dict[str, Any]) -> bool:
 
 
 for _group in SETTINGS_GROUPS:
+    _group_frontends = tuple(_group.get("frontends") or ())
     for _field in _group["fields"]:
         _field["needs_restart"] = field_needs_restart(_field)
+        if _group_frontends:
+            _field["frontends"] = _group_frontends
 
 
 def iter_fields():

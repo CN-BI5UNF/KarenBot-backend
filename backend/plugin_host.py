@@ -74,7 +74,8 @@ class PluginContext:
 
     project_root: Path
     config_file: Path | None = None
-    host: str = "0.0.0.0"
+    host: str | None = None
+    """显式监听地址；None 表示由前端按 config.yaml 的 webui.allow_lan 解析。"""
     port: int = 8000
     token: str | None = None
     no_auth: bool = False

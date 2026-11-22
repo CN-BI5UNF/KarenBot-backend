@@ -43,13 +43,37 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 # ============================================================
 
 
+def _frontend_of(request: Request) -> str:
+    return str(getattr(request.app.state, "frontend", "") or "")
+
+
+def _field_allowed(request: Request, spec: dict[str, Any]) -> bool:
+    allowed = tuple(spec.get("frontends") or ())
+    return not allowed or _frontend_of(request) in allowed
+
+
+def _webui_info(request: Request) -> dict[str, Any]:
+    """当前 WebUI 进程的监听信息；GUI 调用时为空。"""
+    state = request.app.state
+    return {
+        "bind_host": str(getattr(state, "bind_host", "") or ""),
+        "bind_source": str(getattr(state, "bind_source", "") or ""),
+        "bind_port": getattr(state, "bind_port", None),
+        "urls": list(getattr(state, "bind_urls", []) or []),
+    }
+
+
 @router.get("")
 async def read_settings(request: Request) -> dict[str, Any]:
     """按声明表回读全部字段的当前值。"""
     rt = require_runtime(request)
     cfg = rt.config
+    frontend = _frontend_of(request)
     groups: list[dict[str, Any]] = []
     for group in SETTINGS_GROUPS:
+        allowed = tuple(group.get("frontends") or ())
+        if allowed and frontend not in allowed:
+            continue
         fields = []
         for field in group["fields"]:
             entry = dict(field)
@@ -61,6 +85,7 @@ async def read_settings(request: Request) -> dict[str, Any]:
         "groups": groups,
         "paths": _paths_info(rt),
         "secrets_index": _secrets_index(rt),
+        "webui": _webui_info(request),
     }
 
 
@@ -102,10 +127,15 @@ async def patch_setting(
     spec = field_map().get(payload.path)
     if spec is None:
         raise HTTPException(status_code=400, detail=f"不认识的配置项：{payload.path}")
+    if not _field_allowed(request, spec):
+        raise HTTPException(
+            status_code=400, detail=f"该配置项不适用于当前前端：{payload.path}"
+        )
 
     value = _coerce(payload.value, spec)
     cfg = rt.config
     spec_needs_restart = bool(spec.get("needs_restart", True))
+    restart_scope = str(spec.get("restart_scope") or "")
     pending_restart = bool(getattr(rt, "restart_pending", False))
     in_place = not spec_needs_restart and not pending_restart
     try:
@@ -138,7 +168,9 @@ async def patch_setting(
 
     await asyncio.to_thread(host.save_config)
     needs_restart = spec_needs_restart or pending_restart
-    if spec_needs_restart:
+    # WebUI 监听地址只需要重启 WebUI 进程，不影响 Runtime，不能把
+    # Runtime 标记成待重启，否则后续设置都会误报“需要重启 Runtime”。
+    if spec_needs_restart and restart_scope != "webui":
         try:
             rt.restart_pending = True
         except Exception:  # noqa: BLE001
@@ -161,11 +193,14 @@ async def patch_setting(
             # Lightweight test doubles don't own a running Runtime.
             hot_applied = True
     if needs_restart:
-        message = (
-            "已保存；已有待重启的配置，本次修改也会在重启 Runtime 后生效"
-            if pending_restart and not spec_needs_restart
-            else "已保存；需要重启 Runtime 后生效"
-        )
+        if restart_scope == "webui":
+            message = "已保存；需要重启 WebUI 服务后生效"
+        else:
+            message = (
+                "已保存；已有待重启的配置，本次修改也会在重启 Runtime 后生效"
+                if pending_restart and not spec_needs_restart
+                else "已保存；需要重启 Runtime 后生效"
+            )
     elif hot_applied:
         message = "已保存并立即生效"
         if payload.path.startswith("features.container."):
@@ -184,6 +219,7 @@ async def patch_setting(
         "path": payload.path,
         "value": value,
         "needs_restart": needs_restart,
+        "restart_scope": restart_scope,
         "hot_applied": hot_applied,
         "reload": reload_info,
         "message": message,

@@ -999,3 +999,57 @@ def test_check_rejects_invalid_component(workspace):
     with pytest.raises(ModuleUpdateError) as excinfo:
         asyncio.run(service.check("v0.0.2", components=["other"]))
     assert excinfo.value.code == "invalid_component"
+
+
+def test_apply_repairs_legacy_desktop_shortcut_icon(workspace, tmp_path, monkeypatch):
+    """更新 WebUI/GUI 时顺手修复旧安装器留下的 applications-system 图标。"""
+    home = tmp_path / "home"
+    applications = home / ".local" / "share" / "applications"
+    applications.mkdir(parents=True)
+    entry = applications / "karenbot-gui.desktop"
+    entry.write_text(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=KarenBot GUI\n"
+        "Exec=/opt/karenbot/launch-gui.sh\n"
+        "Icon=applications-system\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+
+    icon = '<svg xmlns="http://www.w3.org/2000/svg"><text>K</text></svg>\n'
+    fake = FakeGitHub()
+    fake.add_release(
+        "v0.0.2",
+        backend={
+            "VERSION": "0.0.2\n",
+            "backend/__init__.py": "new backend\n",
+            "packaging/karenbot.svg": icon,
+        },
+        gui={
+            "VERSION": "0.0.2\n",
+            "gui/__init__.py": "new gui\n",
+        },
+        published="2026-11-14T00:00:00Z",
+    )
+    service = _service(workspace, fake)
+    checked = asyncio.run(service.check())
+    result = asyncio.run(
+        service.apply(confirmation_token=checked["confirmation_token"])
+    )
+
+    assert "Icon=karenbot" in entry.read_text(encoding="utf-8")
+    assert result["shortcut_icons"]["changed"] == [str(entry)]
+    installed = (
+        home
+        / ".local"
+        / "share"
+        / "icons"
+        / "hicolor"
+        / "scalable"
+        / "apps"
+        / "karenbot.svg"
+    )
+    assert installed.read_text(encoding="utf-8") == icon
+    assert "桌面快捷方式的旧图标" in result["message"]

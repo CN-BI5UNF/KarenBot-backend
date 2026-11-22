@@ -3,9 +3,9 @@
 
 用法::
 
-    uv run webui_server.py                 # 默认 0.0.0.0:8000，局域网可访问
+    uv run webui_server.py                    # 默认 127.0.0.1:8000，仅本机
     uv run webui_server.py --port 9000
-    uv run webui_server.py --host 127.0.0.1   # 只允许本机
+    uv run webui_server.py --host 0.0.0.0     # 显式允许局域网访问
     uv run webui_server.py --no-auth          # 关掉令牌鉴权（仅限可信内网）
 
 首次启动会自动生成访问令牌并打印在终端，同时存到数据目录的 webui_token.txt。

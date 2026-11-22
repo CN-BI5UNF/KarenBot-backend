@@ -72,7 +72,10 @@ sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
 .venv/bin/python main.py --frontend gui
 ```
 
-也可以直接运行 `python main.py`，默认启动 WebUI。
+也可以直接运行 `python main.py`，默认启动 WebUI；WebUI 默认只监听
+`127.0.0.1`。需要局域网访问时，在设置页「网络」打开
+“允许暴露在局域网中”，或在 `config.yaml` 设置 `webui.allow_lan: true`，
+或启动时显式加 `--host 0.0.0.0`（命令行优先于配置）。
 
 ## 安装器如何组合
 
@@ -84,8 +87,8 @@ v2 起安装器从 `CN-BI5UNF/KarenBot` 的统一 Release 下载 `modules.json`�
 
 | 项目 | 版本 |
 |---|---|
-| v2 统一发行版 | `v2.0.0-alpha` |
-| 应用代码版本 | `2.0.0-alpha` |
+| v2 统一发行版 | `v2.0.1-alpha` |
+| 应用代码版本 | `2.0.1-alpha` |
 | 过渡版 | 后端 `v0.1.11-alpha.1` / 前端 `v0.1.1-alpha.2` |
 
 `VERSION` 是模块发布版本，`backend/__init__.py` 中的代码版本沿用应用兼容版本。

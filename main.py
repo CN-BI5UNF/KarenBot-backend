@@ -1,6 +1,7 @@
 """KarenBot 程序入口。
 
-默认启动 **WebUI**（浏览器控制台，监听 0.0.0.0 供局域网访问），也可以按
+默认启动 **WebUI**（浏览器控制台，默认只监听 127.0.0.1；需要在设置里开启
+``webui.allow_lan`` 或显式传 ``--host 0.0.0.0`` 才允许局域网访问），也可以按
 前端插件 id 启动 GUI：
 
     python main.py --frontend webui   # 默认
@@ -38,7 +39,7 @@ from utils.startup_dependencies import run_startup_dependency_check
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_WEBUI_HOST = "0.0.0.0"
+DEFAULT_WEBUI_HOST = "127.0.0.1"
 DEFAULT_WEBUI_PORT = 8000
 
 # 这些子命令交给 service_cli 处理，避免和正常启动参数混在一起。
@@ -140,8 +141,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--host",
-        default=DEFAULT_WEBUI_HOST,
-        help=f"WebUI 监听地址（默认 {DEFAULT_WEBUI_HOST}，局域网可访问；只给本机用可填 127.0.0.1）",
+        default=None,
+        help=(
+            "WebUI 监听地址；不填时由 config.yaml 的 webui.allow_lan 决定"
+            f"（关闭 {DEFAULT_WEBUI_HOST}，开启 0.0.0.0）。显式填写会覆盖配置"
+        ),
     )
     parser.add_argument(
         "--port",
@@ -323,7 +327,8 @@ def main(argv: list[str] | None = None) -> None:
     context = PluginContext(
         project_root=project_root,
         config_file=config_file,
-        host=getattr(args, "host", DEFAULT_WEBUI_HOST),
+        # None 表示没有显式 --host；WebUI 会读取 webui.allow_lan 决定监听地址。
+        host=getattr(args, "host", None),
         port=int(getattr(args, "port", DEFAULT_WEBUI_PORT)),
         token=(getattr(args, "token", "") or None),
         no_auth=bool(getattr(args, "no_auth", False)),

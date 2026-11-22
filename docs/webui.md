@@ -9,13 +9,17 @@ KarenBot 的界面是浏览器控制台，取代了早期的 PySide6 桌面端�
 ## 启动
 
 ```bash
-uv run python main.py          # 默认 0.0.0.0:8000
+uv run python main.py          # 默认 127.0.0.1:8000，仅本机
 uv run python webui_server.py  # 等价入口，参数相同
 ```
 
+默认只监听本机。需要局域网访问时，在设置页 **网络 → 允许暴露在局域网中**
+打开开关并重启 WebUI，或在 `config.yaml` 设置 `webui.allow_lan: true`，
+或启动时显式传 `--host 0.0.0.0`（命令行优先于配置）。
+
 | 参数 | 说明 |
 |---|---|
-| `--host` | 监听地址，默认 `0.0.0.0`（局域网可访问）。只给本机用填 `127.0.0.1` |
+| `--host` | 监听地址；不填时由 `webui.allow_lan` 决定（关闭 `127.0.0.1`，开启 `0.0.0.0`）。显式填写会覆盖配置 |
 | `--port` | 监听端口，默认 `8000` |
 | `--token` | 固定访问令牌；不填则首次启动自动生成 |
 | `--no-auth` | 关闭令牌鉴权。⚠ 能访问该端口的设备都能看聊天记录、改配置 |
@@ -28,9 +32,8 @@ uv run python webui_server.py  # 等价入口，参数相同
 ================================================================
   KarenBot WebUI 已启动
 ================================================================
-  监听        : 0.0.0.0:8000
+  监听        : 127.0.0.1:8000
   访问地址    : http://127.0.0.1:8000
-  访问地址    : http://192.168.1.10:8000
   访问令牌    : xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
   令牌来源    : /path/to/data/instances/default/webui_token.txt
 ================================================================
@@ -41,8 +44,13 @@ uv run python webui_server.py  # 等价入口，参数相同
 WebUI 能读到全部聊天记录、改配置、换 API Key，所以**默认必须带令牌**，即使在局域网里也一样。
 
 - 令牌优先级：`--token` > 环境变量 `KAREN_WEBUI_TOKEN` > 数据目录下持久化的 `webui_token.txt`（首次启动自动生成，权限 `0600`）
-- 浏览器侧用 `POST /api/auth/login` 换取 HttpOnly 会话 cookie，有效期 30 天
-- 脚本 / curl 可以用 `Authorization: Bearer <token>`，或 `?token=` 查询参数（WebSocket 也认）
+- 浏览器侧用 `POST /api/auth/login` 换取 HttpOnly 会话 cookie，有效期 30 天；
+  HTTPS 下自动加 `Secure`，HTTP 下不加。反向代理场景如果 uvicorn 看不到
+  HTTPS scheme，可设 `KAREN_WEBUI_SECURE_COOKIE=1` 强制启用（确认全站
+  HTTPS 后再开，否则浏览器不会回传 cookie）。
+- 脚本 / curl 优先用 `Authorization: Bearer <token>`；`?token=` 查询参数
+  仍为兼容保留（WebSocket 握手也认），但它可能进入代理日志、浏览器历史和
+  Referer，不要在共享或不可信环境中使用。
 
 放行规则见 `backend/auth.py`。`/`、`/static/*`、`/api/auth/*` 不需要鉴权，其余 `/api/*` 与 `/ws/events` 都要。
 

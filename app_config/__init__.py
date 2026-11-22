@@ -52,6 +52,7 @@ from .schema import (
     VisionFeatureConfig,
     WeatherFeatureConfig,
     WebSearchFeatureConfig,
+    WebUIConfig,
     WhitelistConfig,
     default_tool_result_budgets,
 )
@@ -84,6 +85,7 @@ __all__ = [
     "NapCatAdapterConfig",
     "OneBot11AdapterConfig",
     "TelegramAdapterConfig",
+    "WebUIConfig",
     "WhitelistConfig",
     "ProviderConfig",
     "ReasoningConfig",

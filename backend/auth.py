@@ -155,6 +155,12 @@ def format_token_banner(auth: TokenAuth, *, host: str, port: int, urls: list[str
     ]
     for url in urls:
         lines.append(f"  访问地址    : {url}")
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        lines += [
+            f"  ⚠ 控制 API 已对局域网开放：{host}:{port}",
+            "    能访问该端口的设备可以读取聊天记录、修改配置。",
+            "    请确认网络可信，并使用足够强的访问令牌。",
+        ]
     if auth.enabled:
         lines += [
             f"  访问令牌    : {auth.token}",
