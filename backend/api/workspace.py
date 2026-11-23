@@ -460,7 +460,8 @@ def _launch_default(target: Path) -> None:
     if sys.platform == "darwin":
         commands.append(["open", str(target)])
     elif os.name == "nt":
-        commands.append(["cmd", "/c", "start", "", str(target)])
+        os.startfile(str(target))  # type: ignore[attr-defined]
+        return
     commands.extend([
         ["xdg-open", str(target)],
         ["gio", "open", str(target)],

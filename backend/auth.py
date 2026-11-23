@@ -20,6 +20,7 @@ import logging
 import os
 import secrets
 import stat
+import tempfile
 import time
 from pathlib import Path
 
@@ -62,9 +63,18 @@ def load_or_create_token(paths) -> tuple[str, str]:
     token = _generate_token()
     try:
         token_file.parent.mkdir(parents=True, exist_ok=True)
-        token_file.write_text(token + "\n", encoding="utf-8")
-        # 令牌等价于密码，收窄到仅本人可读。
-        token_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{token_file.name}.", suffix=".tmp", dir=token_file.parent
+        )
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(token + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            tmp.replace(token_file)
+        finally:
+            tmp.unlink(missing_ok=True)
     except OSError as e:  # noqa: BLE001
         logger.warning("写入 %s 失败：%s（令牌仅在本次启动有效）", token_file, e)
         return token, "本次启动随机生成（未能落盘）"

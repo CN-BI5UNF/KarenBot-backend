@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import os
@@ -152,11 +153,24 @@ async def remote_attachment(
     ).lower()
     if kind == "image" and not media_type.startswith("image/"):
         media_type = "image/jpeg"
-    can_inline = (
-        kind in {"image", "video", "audio"}
-        or media_type == "application/pdf"
-        or media_type.startswith("text/")
-    )
+    can_inline = media_type in {
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+        "application/pdf",
+        "text/plain",
+        "text/markdown",
+        "video/mp4",
+        "video/webm",
+        "video/quicktime",
+        "video/x-matroska",
+        "audio/mpeg",
+        "audio/wav",
+        "audio/ogg",
+        "audio/amr",
+    }
     disposition = "inline" if inline and can_inline else "attachment"
     ascii_name = (
         filename.encode("ascii", "replace").decode("ascii").replace('"', "_")
@@ -171,6 +185,7 @@ async def remote_attachment(
             ),
             "Cache-Control": "private, max-age=60",
             "X-Content-Type-Options": "nosniff",
+            **({"Content-Security-Policy": "sandbox"} if disposition == "inline" else {}),
         },
     )
 
@@ -220,28 +235,28 @@ async def conversation(
     # Q01: Keyset 游标快速路径
     if cursor is not None:
         from core.chat_pagination import ChatPageRequest, ChatPaginationManager
-        db_path = getattr(rt.paths, "DATA_DIR", None)
-        if db_path is not None:
-            db_file = db_path / "karen.db"
-            if db_file.exists():
-                persona_id = _runtime_persona_id(rt)
-                mgr = ChatPaginationManager(db_file)
-                res = mgr.fetch_page(
-                    ChatPageRequest(
-                        persona_id=persona_id,
-                        conversation_id=conversation_id,
-                        cursor=cursor,
-                        limit=min(limit, 200),
-                    )
+        persona_id = _runtime_persona_id(rt)
+        mem_dir = rt.paths.memory_dir_for(persona_id)
+        db_file = mem_dir / f"{persona_id}.db"
+        if db_file.is_file():
+            mgr = ChatPaginationManager(db_file)
+            res = await asyncio.to_thread(
+                mgr.fetch_page,
+                ChatPageRequest(
+                    persona_id=persona_id,
+                    conversation_id=conversation_id,
+                    cursor=cursor,
+                    limit=min(limit, 200),
                 )
-                return {
-                    "conversation": {"key": conversation_id, "label": conversation_id},
-                    "records": [_record_to_json(r) for r in res.items],
-                    "truncated": res.has_more,
-                    "total": res.total_count,
-                    "next_cursor": res.next_cursor,
-                    "prev_cursor": res.prev_cursor,
-                }
+            )
+            return {
+                "conversation": {"key": conversation_id, "label": conversation_id},
+                "records": [_record_to_json(r) for r in res.items],
+                "truncated": res.has_more,
+                "total": res.total_count,
+                "next_cursor": res.next_cursor,
+                "prev_cursor": res.prev_cursor,
+            }
 
     try:
         records, grouped = await _load_chat_page_records_and_groups(rt)
@@ -274,15 +289,23 @@ async def chat_page(
 ) -> dict[str, Any]:
     """Q01: 基于 SQLite Keyset 的稳定只读 Read Model 分页。"""
     rt = require_runtime(request)
-    from pathlib import Path
-
     from core.chat_pagination import ChatPageRequest, ChatPaginationManager
 
-    data_dir = getattr(rt.paths, "DATA_DIR", Path("data"))
-    db_file = data_dir / "karen.db"
     persona_id = _runtime_persona_id(rt)
+    db_file = rt.paths.memory_dir_for(persona_id) / f"{persona_id}.db"
+    if not db_file.is_file():
+        return {
+            "items": [],
+            "next_cursor": None,
+            "prev_cursor": None,
+            "has_more": False,
+            "count": 0,
+            "total_count": 0,
+            "is_exact_count": True,
+        }
     mgr = ChatPaginationManager(db_file)
-    res = mgr.fetch_page(
+    res = await asyncio.to_thread(
+        mgr.fetch_page,
         ChatPageRequest(
             persona_id=persona_id,
             conversation_id=conversation_id,
@@ -290,7 +313,7 @@ async def chat_page(
             limit=limit,
             query=query,
             direction=direction,
-        )
+        ),
     )
     return {
         "items": [_record_to_json(r) for r in res.items],

@@ -237,7 +237,7 @@ def resolve_send_image_ref(
     parsed = urlparse(value)
     if parsed.scheme in {"http", "https"} and parsed.netloc:
         return None, value, "[图片]"
-    if parsed.scheme and parsed.scheme not in {"http", "https"}:
+    if len(parsed.scheme) > 1 and parsed.scheme not in {"http", "https"}:
         raise MessageBuildError("image 只支持 http(s) URL 或 workspace 内路径")
 
     from .workspace import WorkspaceError, relative_to_workspace, resolve_in_workspace

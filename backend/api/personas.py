@@ -23,6 +23,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 from backend import persona_admin
 from backend.persona_admin import PersonaAdminError
@@ -55,6 +56,29 @@ def _persona_dirs(paths: Any) -> list[Path]:
 def _persona_images(rt: Any) -> PersonaImageStore:
     store = getattr(rt, "persona_image_store", None)
     return store if isinstance(store, PersonaImageStore) else PersonaImageStore(rt.paths)
+
+
+def _persona_directory(rt: Any, name: str) -> Path:
+    try:
+        valid_name = persona_admin.validate_persona_name(name)
+    except PersonaAdminError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if valid_name != name:
+        raise HTTPException(status_code=400, detail="人格名格式无效")
+    root = Path(rt.paths.PERSONAS_DIR)
+    directory = root / valid_name
+    if directory.is_symlink():
+        raise HTTPException(status_code=400, detail="拒绝访问符号链接人格目录")
+    try:
+        resolved_root = root.resolve(strict=True)
+        resolved_directory = directory.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"人格 {name!r} 不存在") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"无法检查人格目录：{exc}") from exc
+    if resolved_directory.parent != resolved_root or not resolved_directory.is_dir():
+        raise HTTPException(status_code=400, detail="人格目录越界")
+    return directory
 
 
 def _safe_appearance(rt: Any, name: str) -> dict[str, Any] | None:
@@ -337,8 +361,9 @@ async def read_prompt_source(request: Request, name: str) -> dict[str, Any]:
     本身（给模型改）。
     """
     rt = require_runtime(request)
-    path = Path(rt.paths.PERSONAS_DIR) / name / persona_admin.PERSONA_FILE
-    if not path.is_file():
+    directory = _persona_directory(rt, name)
+    path = directory / persona_admin.PERSONA_FILE
+    if path.is_symlink() or not path.is_file():
         raise HTTPException(status_code=404, detail=f"人格 {name!r} 不存在")
     try:
         text = await asyncio.to_thread(path.read_text, "utf-8", "replace")
@@ -356,8 +381,9 @@ async def activate(request: Request, name: str) -> dict[str, Any]:
     """切换当前人格（写配置，需要重启 Runtime 生效）。"""
     rt = require_runtime(request)
     host = request.app.state.host
-    paths = rt.paths
-    if not (Path(paths.PERSONAS_DIR) / name / "persona_prompt.py").is_file():
+    directory = _persona_directory(rt, name)
+    prompt_path = directory / "persona_prompt.py"
+    if prompt_path.is_symlink() or not prompt_path.is_file():
         raise HTTPException(status_code=404, detail=f"人格 {name!r} 不存在")
 
     rt.config.persona.active = name
@@ -401,23 +427,37 @@ async def delete_persona(request: Request, name: str) -> dict[str, Any]:
 async def export_persona(request: Request, name: str) -> FileResponse:
     """把人格目录打包成 zip 下载。"""
     rt = require_runtime(request)
-    directory = Path(rt.paths.PERSONAS_DIR) / name
-    if not directory.is_dir():
+    directory = _persona_directory(rt, name)
+    prompt_path = directory / "persona_prompt.py"
+    if prompt_path.is_symlink():
+        raise HTTPException(status_code=400, detail="人格提示词文件不能是符号链接")
+    if not prompt_path.is_file():
         raise HTTPException(status_code=404, detail=f"人格 {name!r} 不存在")
 
     def _zip() -> Path:
-        tmp = Path(tempfile.mkdtemp(prefix="karen-persona-")) / f"{name}.zip"
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
-            for path in directory.rglob("*"):
-                if path.is_file():
-                    zf.write(path, path.relative_to(directory.parent))
-        return tmp
+        tmp_dir = Path(tempfile.mkdtemp(prefix="karen-persona-"))
+        tmp = tmp_dir / f"{name}.zip"
+        try:
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+                for path in directory.rglob("*"):
+                    if path.is_symlink():
+                        raise ValueError(f"人格目录不能包含符号链接：{path.name}")
+                    if path.is_file():
+                        zf.write(path, path.relative_to(directory.parent))
+            return tmp
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
 
-    archive = await asyncio.to_thread(_zip)
+    try:
+        archive = await asyncio.to_thread(_zip)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return FileResponse(
         archive,
         media_type="application/zip",
         filename=f"{name}.zip",
+        background=BackgroundTask(shutil.rmtree, archive.parent, ignore_errors=True),
     )
 
 
@@ -428,29 +468,41 @@ async def import_persona(
 ) -> dict[str, Any]:
     """上传 zip 导入人格；目录名冲突时 ``import_persona_zip`` 会加后缀。"""
     rt = require_runtime(request)
-    from agents.persona_import import import_persona_zip
+    from agents.persona_import import (
+        MAX_PERSONA_ARCHIVE_BYTES,
+        import_persona_zip,
+    )
 
     if not (file.filename or "").lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="只支持 .zip 人格包")
 
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="上传内容为空")
+    if file.size is not None and file.size > MAX_PERSONA_ARCHIVE_BYTES:
+        raise HTTPException(status_code=413, detail="人格压缩包超过大小上限")
 
-    def _do_import() -> str:
+    def _do_import(source: Any) -> str:
         tmp_dir = Path(tempfile.mkdtemp(prefix="karen-persona-import-"))
         tmp_zip = tmp_dir / "persona.zip"
-        tmp_zip.write_bytes(data)
         try:
+            total = 0
+            with tmp_zip.open("wb") as output:
+                while chunk := source.read(64 * 1024):
+                    total += len(chunk)
+                    if total > MAX_PERSONA_ARCHIVE_BYTES:
+                        raise ValueError("人格压缩包超过大小上限")
+                    output.write(chunk)
+            if total == 0:
+                raise ValueError("上传内容为空")
             return import_persona_zip(tmp_zip, Path(rt.paths.PERSONAS_DIR))
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     try:
-        name = await asyncio.to_thread(_do_import)
+        name = await asyncio.to_thread(_do_import, file.file)
     except Exception as e:  # noqa: BLE001
         logger.exception("导入人格失败")
         raise HTTPException(status_code=400, detail=f"导入失败：{e}") from e
+    finally:
+        await file.close()
     return {"ok": True, "message": f"已导入人格 {name}", "id": name}
 
 
@@ -458,8 +510,9 @@ async def import_persona(
 async def read_prompt(request: Request, name: str) -> dict[str, Any]:
     """读取人格提示词源码（只读预览）。"""
     rt = require_runtime(request)
-    path = Path(rt.paths.PERSONAS_DIR) / name / "persona_prompt.py"
-    if not path.is_file():
+    directory = _persona_directory(rt, name)
+    path = directory / "persona_prompt.py"
+    if path.is_symlink() or not path.is_file():
         raise HTTPException(status_code=404, detail=f"人格 {name!r} 不存在")
     try:
         text = await asyncio.to_thread(path.read_text, "utf-8", "replace")

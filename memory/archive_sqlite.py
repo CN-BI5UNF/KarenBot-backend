@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -86,6 +87,14 @@ from .archive_sqlite_records import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _ClosingSQLiteConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
 
 __all__ = [
     "SqliteArchiveStore",
@@ -171,6 +180,8 @@ class SqliteArchiveStore:
     def __init__(self, path: Path) -> None:
         self.path = _normalize_archive_path(path)
         self._lock = asyncio.Lock()
+        self._schema_lock = threading.Lock()
+        self._schema_ready = False
 
     async def load(self, force_reload: bool = False) -> list[dict]:
         _ = force_reload
@@ -262,11 +273,18 @@ class SqliteArchiveStore:
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(
+            self.path, timeout=30.0, factory=_ClosingSQLiteConnection
+        )
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA synchronous=NORMAL")
-        self._ensure_schema(conn)
+        if not self._schema_ready:
+            with self._schema_lock:
+                if not self._schema_ready:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    self._ensure_schema(conn)
+                    self._schema_ready = True
         return conn
 
     @staticmethod

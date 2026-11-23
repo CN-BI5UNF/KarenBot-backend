@@ -409,55 +409,55 @@ def _run_napcat_setup(paths) -> None:
 
 
 async def _test_adapter(project_root: Path, config_file: Path | None = None) -> None:
-    """启动 NapCat adapter 5 秒，报告连接情况。"""
+    """启动已配置的 adapter 5 秒，报告连接情况。"""
     from core import Runtime
 
     print("=" * 60)
-    print("测试 NapCat 适配器连接（5 秒）")
-    print("=" * 60)
-
     rt = Runtime(project_root=project_root, config_file=config_file)
     try:
-        await rt.start()
-    except Exception as e:
-        print(f"\n✗ Runtime 启动失败：{e}")
-        return
+        try:
+            await rt.start()
+        except Exception as e:
+            print(f"\nRuntime 启动失败：{e}")
+            return
 
-    # 启动后立刻打印配置摘要，方便用户判断"程序在用什么配置"
-    adapter_name, cfg = next(iter(rt.config.adapters.items()))
-    endpoint = f"ws://{cfg.host}:{cfg.port}{cfg.path}"
-    print("\n程序配置：")
-    print(f"  adapter  = {adapter_name}")
-    print(f"  mode     = {cfg.mode}")
-    print(f"  endpoint = {endpoint}")
-    print(f"  token_id = {cfg.access_token_id or '(无)'}")
-    if cfg.mode == "client":
-        print(f"  NapCat 这边应该: 「正向 WS」监听 {endpoint}")
-    else:
-        print(f"  程序监听地址: {endpoint}")
-        print("  NapCat 这边应该: 「反向 WS」目标填这台机器的局域网 IP + 同端口/路径")
+        adapter = getattr(rt, "adapter", None)
+        if adapter is None:
+            print("没有启用的适配器。")
+            return
 
-    print("\nAdapter 已启动。等 5 秒看连接情况...")
-    for i in range(5):
-        await asyncio.sleep(1)
-        connected = rt.adapter.is_connected
-        marker = "✓" if connected else "·"
-        print(f"  [{i + 1}/5] {marker} is_connected={connected}")
-        if connected:
-            print("\n✓ 连接成功！")
-            break
-    else:
-        print("\n✗ 5 秒内未建立连接。检查：")
-        if cfg.mode == "client":
-            print(f"   - NapCat 那边「正向 WS」是否在 {endpoint} 监听？")
-            print("   - Token 是否一致？")
+        adapter_name = getattr(adapter, "name", "adapter")
+        cfg = (getattr(rt.config, "adapters", {}) or {}).get(adapter_name)
+        if cfg is None:
+            cfg = next(iter((getattr(rt.config, "adapters", {}) or {}).values()), None)
+        print(f"测试 {adapter_name} 连接（5 秒）")
+        print(f"adapter = {adapter_name}")
+        if cfg is not None:
+            mode = getattr(cfg, "mode", getattr(cfg, "transport", ""))
+            if mode:
+                print(f"mode = {mode}")
+            host = getattr(cfg, "host", None)
+            port = getattr(cfg, "port", None)
+            path = getattr(cfg, "path", None)
+            if host is not None and port is not None and path is not None:
+                print(f"endpoint = ws://{host}:{port}{path}")
+
+        print("等待连接状态...")
+        for index in range(5):
+            await asyncio.sleep(1)
+            connected = bool(adapter.is_connected)
+            print(f"  [{index + 1}/5] is_connected={connected}")
+            if connected:
+                print("连接成功。")
+                break
         else:
-            print("   - NapCat 那边「反向 WS」目标是否填了这台机器的局域网 IP？")
-            print(f"   - 端口和路径是否与程序监听一致：{cfg.port}{cfg.path}？")
-            print("   - Token 是否一致？")
-
-    await rt.shutdown()
-    print("=" * 60)
+            print("5 秒内未建立连接，请检查适配器地址、Token 和网络设置。")
+    finally:
+        try:
+            await rt.shutdown()
+        except Exception as e:  # noqa: BLE001
+            print(f"Runtime 清理失败：{e}")
+        print("=" * 60)
 
 
 if __name__ == "__main__":

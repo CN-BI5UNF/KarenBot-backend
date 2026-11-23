@@ -25,6 +25,7 @@ import hmac
 import logging
 import os
 import secrets
+import stat
 import threading
 import time
 import uuid
@@ -36,7 +37,67 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 DEFAULT_LEASE_TTL_SECONDS = 300.0  # 5 分钟
-_CSRF_SECRET = b"karen-csrf-protection-secret-v2.6"
+_CSRF_SECRET: bytes | None = None
+_CSRF_SECRET_LOCK = threading.Lock()
+
+
+def _csrf_secret() -> bytes:
+    global _CSRF_SECRET
+    if _CSRF_SECRET is not None:
+        return _CSRF_SECRET
+    with _CSRF_SECRET_LOCK:
+        if _CSRF_SECRET is not None:
+            return _CSRF_SECRET
+        configured = os.environ.get("KAREN_CSRF_SECRET")
+        if configured:
+            _CSRF_SECRET = hashlib.sha256(configured.encode("utf-8")).digest()
+            return _CSRF_SECRET
+
+        configured_path = os.environ.get("KAREN_CSRF_SECRET_FILE")
+        if configured_path:
+            key_path = Path(configured_path).expanduser()
+        else:
+            from app_config.paths import AppPaths
+
+            key_path = AppPaths().DATA_DIR / "csrf_secret.bin"
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        for _attempt in range(50):
+            try:
+                fd = os.open(key_path, os.O_RDONLY | nofollow)
+            except FileNotFoundError:
+                candidate = secrets.token_bytes(32)
+                try:
+                    fd = os.open(
+                        key_path,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+                        0o600,
+                    )
+                except FileExistsError:
+                    time.sleep(0.01)
+                    continue
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(candidate)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                _CSRF_SECRET = candidate
+                return candidate
+
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise RuntimeError("CSRF secret path must be a regular file")
+                data = os.read(fd, 33)
+                if len(data) == 32:
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(fd, 0o600)
+                    _CSRF_SECRET = data
+                    return data
+                if data:
+                    raise RuntimeError("CSRF secret file must contain exactly 32 bytes")
+            finally:
+                os.close(fd)
+            time.sleep(0.01)
+        raise RuntimeError("CSRF secret file was not initialized")
 
 
 class ConfigConflictError(RuntimeError):
@@ -101,6 +162,8 @@ def safe_merge_config_draft(
     merged = deepcopy(base)
 
     for key, value in patch.items():
+        if key in protected_keys:
+            continue
         if value is None:
             # None 不修改原值
             continue
@@ -112,10 +175,6 @@ def safe_merge_config_draft(
             and not value.strip()
         ):
             # 空 key 忽略，保留原 key
-            continue
-
-        if key in protected_keys and key not in patch:
-            # 保护键直接保留
             continue
 
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
@@ -223,7 +282,7 @@ def generate_csrf_token(session_id: str) -> str:
     """生成带 HMAC 签名的 CSRF Token。"""
     timestamp = str(int(time.time()))
     payload = f"{session_id}:{timestamp}".encode()
-    sig = hmac.new(_CSRF_SECRET, payload, hashlib.sha256).hexdigest()[:16]
+    sig = hmac.new(_csrf_secret(), payload, hashlib.sha256).hexdigest()[:16]
     return f"{timestamp}:{sig}"
 
 
@@ -239,10 +298,11 @@ def validate_csrf_token(
     try:
         ts_str, sig = token.split(":", 1)
         created_at = float(ts_str)
-        if time.time() - created_at > max_age_seconds:
+        now = time.time()
+        if created_at < 0 or created_at > now + 60 or now - created_at > max_age_seconds:
             return False  # 过期
         payload = f"{session_id}:{ts_str}".encode()
-        expected_sig = hmac.new(_CSRF_SECRET, payload, hashlib.sha256).hexdigest()[:16]
+        expected_sig = hmac.new(_csrf_secret(), payload, hashlib.sha256).hexdigest()[:16]
         return hmac.compare_digest(sig, expected_sig)
     except Exception:
         return False
@@ -262,18 +322,30 @@ def validate_origin_header(
     from urllib.parse import urlparse
 
     parsed = urlparse(target)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return False
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
     hostname = (parsed.hostname or "").lower()
-    port = parsed.port
+    effective_port = port or (443 if parsed.scheme.lower() == "https" else 80)
 
     for allowed in allowed_hosts:
         allowed = allowed.lower()
         if allowed == "*":
             return True
-        if ":" in allowed:
-            a_host, a_port = allowed.split(":", 1)
-            if hostname == a_host and (port is None or str(port) == a_port):
-                return True
-        elif hostname == allowed:
+        allowed_parsed = urlparse(f"//{allowed}")
+        try:
+            allowed_port = allowed_parsed.port
+        except ValueError:
+            continue
+        allowed_host = (allowed_parsed.hostname or "").lower()
+        if not allowed_host:
+            continue
+        if hostname == allowed_host and (
+            allowed_port is None or effective_port == allowed_port
+        ):
             return True
 
     return False

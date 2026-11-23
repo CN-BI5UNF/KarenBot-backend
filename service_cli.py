@@ -213,7 +213,7 @@ def _configured_service_args() -> list[str]:
 def _fallback_argv() -> list[str]:
     extras = _configured_service_args()
     if not extras:
-        extras = ["--host", "0.0.0.0", "--port", "8000"]
+        extras = ["--port", "8000"]
     return [str(_service_python()), str(PROJECT_ROOT / "main.py"), *extras]
 
 

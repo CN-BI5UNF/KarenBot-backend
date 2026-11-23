@@ -5,36 +5,133 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import stat
+import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from .persona_loader import validate_persona_name
+from .persona_loader import _load_persona_constants, validate_persona_name
 
 
 class PersonaImportError(ValueError):
     """人格导入校验失败。"""
 
 
+MAX_PERSONA_ZIP_ENTRIES = 512
+MAX_PERSONA_FILE_BYTES = 64 * 1024 * 1024
+MAX_PERSONA_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_PERSONA_ARCHIVE_BYTES = MAX_PERSONA_TOTAL_BYTES + 8 * 1024 * 1024
+_COPY_CHUNK_BYTES = 64 * 1024
+
+
 def validate_persona_source_dir(src: Path) -> Path:
     """校验 src 是可导入的人格目录，并返回绝对路径。"""
+    src = Path(src).expanduser()
+    if src.is_symlink():
+        raise PersonaImportError(f"人格目录不能是符号链接：{src}")
     src = src.resolve()
     if not src.is_dir():
         raise PersonaImportError(f"不是目录：{src}")
     validate_persona_name(src.name)
-    if not (src / "persona_prompt.py").is_file():
+    prompt_path = src / "persona_prompt.py"
+    if prompt_path.is_symlink() or not prompt_path.is_file():
         raise PersonaImportError(f"目录下没有 persona_prompt.py：{src}")
     return src
+
+
+def _validate_persona_prompt(path: Path) -> None:
+    try:
+        _load_persona_constants(path)
+    except ValueError as exc:
+        raise PersonaImportError(str(exc)) from exc
+
+
+def _persona_tree_entries(src: Path) -> list[tuple[Path, bool]]:
+    entries: list[tuple[Path, bool]] = []
+    total_bytes = 0
+
+    def raise_walk_error(error: OSError) -> None:
+        raise PersonaImportError(f"无法读取人格目录：{error}") from error
+
+    for current, dirnames, filenames in os.walk(
+        src, topdown=True, followlinks=False, onerror=raise_walk_error
+    ):
+        current_path = Path(current)
+        for name in sorted((*dirnames, *filenames)):
+            path = current_path / name
+            try:
+                metadata = path.lstat()
+            except OSError as exc:
+                raise PersonaImportError(f"无法检查人格文件：{path}") from exc
+            if stat.S_ISLNK(metadata.st_mode):
+                raise PersonaImportError(f"人格目录不能包含符号链接：{path}")
+            if len(entries) >= MAX_PERSONA_ZIP_ENTRIES:
+                raise PersonaImportError("人格目录文件数量超过上限")
+            is_dir = stat.S_ISDIR(metadata.st_mode)
+            if not is_dir:
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise PersonaImportError(f"人格目录只允许普通文件：{path}")
+                if metadata.st_size > MAX_PERSONA_FILE_BYTES:
+                    raise PersonaImportError(f"人格文件超过大小上限：{path.name}")
+                total_bytes += metadata.st_size
+                if total_bytes > MAX_PERSONA_TOTAL_BYTES:
+                    raise PersonaImportError("人格目录总大小超过上限")
+            entries.append((path.relative_to(src), is_dir))
+    return entries
+
+
+def _copy_persona_tree(src: Path, destination: Path, entries: list[tuple[Path, bool]]) -> None:
+    destination.mkdir()
+    total_bytes = 0
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    for relative_path, is_dir in entries:
+        source_path = src / relative_path
+        target_path = destination / relative_path
+        if is_dir:
+            target_path.mkdir(parents=True, exist_ok=True)
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(source_path, os.O_RDONLY | nofollow)
+        except OSError as exc:
+            raise PersonaImportError(f"无法安全打开人格文件：{source_path}") from exc
+        with os.fdopen(fd, "rb") as source, target_path.open("xb") as target:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise PersonaImportError(f"人格目录只允许普通文件：{source_path}")
+            copied = 0
+            while chunk := source.read(_COPY_CHUNK_BYTES):
+                copied += len(chunk)
+                total_bytes += len(chunk)
+                if copied > MAX_PERSONA_FILE_BYTES:
+                    raise PersonaImportError(f"人格文件超过大小上限：{source_path.name}")
+                if total_bytes > MAX_PERSONA_TOTAL_BYTES:
+                    raise PersonaImportError("人格目录总大小超过上限")
+                target.write(chunk)
 
 
 def copy_persona_dir(src: Path, personas_dir: Path) -> str:
     """复制人格目录到 personas_dir，拒绝同名覆盖。返回导入后名称。"""
     src = validate_persona_source_dir(src)
+    entries = _persona_tree_entries(src)
+    _validate_persona_prompt(src / "persona_prompt.py")
     personas_dir.mkdir(parents=True, exist_ok=True)
     dst = personas_dir / src.name
-    if dst.exists():
+    if dst.exists() or dst.is_symlink():
         raise PersonaImportError(f"角色「{src.name}」已存在，请先重命名后再导入")
-    shutil.copytree(src, dst)
+    staging_root = Path(tempfile.mkdtemp(prefix=".persona-import-", dir=personas_dir))
+    staged_persona = staging_root / src.name
+    try:
+        _copy_persona_tree(src, staged_persona, entries)
+        _validate_persona_prompt(staged_persona / "persona_prompt.py")
+        if dst.exists() or dst.is_symlink():
+            raise PersonaImportError(f"角色「{src.name}」已存在，请先重命名后再导入")
+        staged_persona.rename(dst)
+    except Exception:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        raise
+    shutil.rmtree(staging_root, ignore_errors=True)
     return src.name
 
 
@@ -52,33 +149,67 @@ def import_persona_zip(zip_path: Path, personas_dir: Path) -> str:
             raise PersonaImportError("zip 内缺少 persona_prompt.py")
 
         dst = personas_dir / root
-        if dst.exists():
+        if dst.exists() or dst.is_symlink():
             raise PersonaImportError(f"角色「{root}」已存在，请先重命名后再导入")
 
-        base = personas_dir.resolve()
-        for info, parts in entries:
-            target = (personas_dir / Path(*parts)).resolve()
-            try:
-                target.relative_to(base)
-            except ValueError as e:
-                raise PersonaImportError(f"zip 含非法路径：{info.filename}") from e
-            if info.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info, "r") as src, open(target, "wb") as out:
-                shutil.copyfileobj(src, out)
+        staging_root = Path(tempfile.mkdtemp(prefix=".persona-import-", dir=personas_dir))
+        staged_persona = staging_root / root
+        base = staging_root.resolve()
+        extracted_bytes = 0
+        try:
+            for info, parts in entries:
+                target = (staging_root / Path(*parts)).resolve()
+                try:
+                    target.relative_to(base)
+                except ValueError as e:
+                    raise PersonaImportError(f"zip 含非法路径：{info.filename}") from e
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                copied = 0
+                with zf.open(info, "r") as src, open(target, "xb") as out:
+                    while chunk := src.read(_COPY_CHUNK_BYTES):
+                        copied += len(chunk)
+                        extracted_bytes += len(chunk)
+                        if copied > MAX_PERSONA_FILE_BYTES:
+                            raise PersonaImportError(f"人格文件超过大小上限：{info.filename}")
+                        if extracted_bytes > MAX_PERSONA_TOTAL_BYTES:
+                            raise PersonaImportError("人格包解压总大小超过上限")
+                        out.write(chunk)
+                if copied != info.file_size:
+                    raise PersonaImportError(f"人格文件解压大小不匹配：{info.filename}")
+            _validate_persona_prompt(staged_persona / "persona_prompt.py")
+            if dst.exists() or dst.is_symlink():
+                raise PersonaImportError(f"角色「{root}」已存在，请先重命名后再导入")
+            staged_persona.rename(dst)
+        except Exception:
+            shutil.rmtree(staging_root, ignore_errors=True)
+            raise
+        shutil.rmtree(staging_root, ignore_errors=True)
     return root
 
 
 def _validated_zip_entries(
     zf: zipfile.ZipFile,
 ) -> list[tuple[zipfile.ZipInfo, tuple[str, ...]]]:
+    infos = zf.infolist()
+    if len(infos) > MAX_PERSONA_ZIP_ENTRIES:
+        raise PersonaImportError("人格包文件数量超过上限")
     entries: list[tuple[zipfile.ZipInfo, tuple[str, ...]]] = []
-    for info in zf.infolist():
+    total_bytes = 0
+    for info in infos:
         name = info.filename
         if not name or name.endswith("/"):
             continue
+        mode = info.external_attr >> 16
+        if stat.S_ISLNK(mode):
+            raise PersonaImportError(f"人格包不允许包含符号链接：{name}")
+        if info.file_size > MAX_PERSONA_FILE_BYTES:
+            raise PersonaImportError(f"人格文件超过大小上限：{name}")
+        total_bytes += info.file_size
+        if total_bytes > MAX_PERSONA_TOTAL_BYTES:
+            raise PersonaImportError("人格包解压总大小超过上限")
         path = PurePosixPath(name)
         if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
             raise PersonaImportError(f"zip 含非法路径：{name}")

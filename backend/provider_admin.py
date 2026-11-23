@@ -398,6 +398,65 @@ class ProbeTarget(NamedTuple):
     api_key: str
     model: str
     vendor: str = ""
+    public_only: bool = False
+
+
+def _probe_url_identity(base_url: str, protocol: str) -> tuple[str, str, int, str]:
+    from urllib.parse import urlsplit
+
+    from providers.registry import normalize_base_url
+
+    normalized = normalize_base_url(base_url, protocol)
+    parsed = urlsplit(normalized)
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ProviderAdminError("Base URL 必须是有效的 HTTP/HTTPS 地址")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ProviderAdminError("Base URL 端口无效") from exc
+    scheme = parsed.scheme.lower()
+    return (
+        scheme,
+        parsed.hostname.rstrip(".").lower(),
+        port or (443 if scheme == "https" else 80),
+        parsed.path.rstrip("/"),
+    )
+
+
+def _validate_public_probe_target(base_url: str, protocol: str) -> None:
+    from urllib.parse import urlsplit
+
+    from httpx import InvalidURL
+
+    from providers.registry import normalize_base_url
+    from providers.safe_http import UnsafeProviderTarget, pin_public_url
+
+    normalized = normalize_base_url(base_url, protocol)
+    parsed = urlsplit(normalized)
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ProviderAdminError("Base URL 必须是有效的 HTTP/HTTPS 地址")
+    try:
+        pin_public_url(normalized)
+    except InvalidURL as exc:
+        raise ProviderAdminError("Base URL 端口无效") from exc
+    except UnsafeProviderTarget as exc:
+        raise ProviderAdminError(str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise ProviderAdminError("无法安全解析 Provider 地址") from exc
 
 
 def resolve_probe_target(
@@ -441,15 +500,36 @@ def resolve_probe_target(
     if not base_url:
         raise ProviderAdminError("还没填 Base URL")
 
+    requested_base_url = base_url
+    resolved_base_url = normalize_base_url(base_url, protocol)
+    saved_preset_id = getattr(existing, "preset", None) if existing else None
+    saved_preset = presets.get(saved_preset_id.lower()) if saved_preset_id else None
+    existing_base_url = (
+        getattr(existing, "base_url", None) if existing else None
+    ) or (saved_preset.base_url if saved_preset else None)
+    existing_protocol = (
+        getattr(existing, "protocol", None) if existing else None
+    ) or (saved_preset.protocol if saved_preset else None)
+    matches_saved_target = bool(
+        existing is not None
+        and existing_base_url
+        and existing_protocol
+        and _probe_url_identity(requested_base_url, protocol)
+        == _probe_url_identity(existing_base_url, existing_protocol)
+    )
+    if not matches_saved_target:
+        _validate_public_probe_target(resolved_base_url, protocol)
+
     api_key = payload.api_key or ""
     if not api_key:
-        key_id = (
-            payload.api_key_id
-            or (getattr(existing, "api_key_id", None) if existing else None)
-            or (key_id_for(provider_id) if provider_id else "")
-        )
-        if key_id:
-            api_key = secrets.get(key_id) or ""
+        if existing is None:
+            raise ProviderAdminError("未保存的配置必须直接提供 API Key")
+        configured_key_id = getattr(existing, "api_key_id", None) or key_id_for(provider_id)
+        if payload.api_key_id and payload.api_key_id != configured_key_id:
+            raise ProviderAdminError("不能在探测时引用其他已保存的密钥")
+        if not matches_saved_target:
+            raise ProviderAdminError("已保存的密钥只能发送到该 Provider 已保存的 Base URL")
+        api_key = secrets.get(configured_key_id) or ""
     if not api_key:
         raise ProviderAdminError("还没填 API Key")
 
@@ -478,10 +558,11 @@ def resolve_probe_target(
     )
     return ProbeTarget(
         protocol=protocol,
-        base_url=normalize_base_url(base_url, protocol),
+        base_url=resolved_base_url,
         api_key=api_key,
         model=model,
         vendor=vendor,
+        public_only=not matches_saved_target,
     )
 
 

@@ -316,9 +316,10 @@ async def check(
     target_tag = payload.target_tag if payload else None
     components = payload.components if payload else None
     try:
-        return await _service(request).check(
-            target_tag=target_tag, components=components
-        )
+        service = _service(request)
+        if isinstance(service, ModuleUpdateService):
+            return await service.check(target_tag=target_tag, components=components)
+        return await service.check(target_tag=target_tag)
     except (UpdateError, ModuleUpdateError) as exc:
         raise _http_error(exc) from exc
 

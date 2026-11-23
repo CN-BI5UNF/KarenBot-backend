@@ -141,8 +141,17 @@ class ChatPaginationManager:
 
     def fetch_page(self, req: ChatPageRequest) -> ChatPageResponse:
         """从 SQLite 获取 Keyset 分页，墓碑优先过滤并保证工具组完整。"""
-        limit = max(1, min(int(req.limit), MAX_PAGE_SIZE))
         conn = self._get_connection()
+        try:
+            return self._fetch_page(req, conn)
+        finally:
+            if not isinstance(self._db_or_conn, (sqlite3.Connection, KarenDB)):
+                conn.close()
+
+    def _fetch_page(
+        self, req: ChatPageRequest, conn: sqlite3.Connection
+    ) -> ChatPageResponse:
+        limit = max(1, min(int(req.limit), MAX_PAGE_SIZE))
         persona_id = req.persona_id
 
         # 检查表是否存在

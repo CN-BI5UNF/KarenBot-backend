@@ -323,6 +323,8 @@ class RuntimeHost:
 
         manifest_path = Path(self.project_root) / "compatibility.json"
         try:
+            if manifest_path.is_symlink():
+                raise ValueError("拒绝使用符号链接 manifest")
             manifest_path = manifest_path.resolve()
             manifest_path.relative_to(Path(self.project_root).resolve())
         except (OSError, ValueError):

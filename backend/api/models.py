@@ -33,7 +33,8 @@ STATUS_TEXT = {
     "ERROR": "出错了",
 }
 
-_running_installs: dict[str, asyncio.subprocess.Process] = {}
+_running_installs: dict[str, asyncio.Task[None]] = {}
+_install_tasks: set[asyncio.Task[None]] = set()
 
 
 def _manager(rt: Any) -> Any:
@@ -132,7 +133,7 @@ async def install_deps(
     payload = payload or InstallDepsPayload()
 
     running = _running_installs.get(name)
-    if running is not None and running.returncode is None:
+    if running is not None and not running.done():
         return {"ok": True, "started": False, "message": "该模型依赖正在安装中"}
 
     missing = model_guide.missing_python_deps(record)
@@ -144,26 +145,30 @@ async def install_deps(
 
     async def _run() -> None:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable,
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=env,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("启动依赖安装进程失败：%s", missing)
-            return
-        _running_installs[name] = proc
-        logger.info("开始安装 %s 的依赖：%s", name, ", ".join(missing))
-        assert proc.stdout is not None
-        async for raw in proc.stdout:
-            logger.info("[pip:%s] %s", name, raw.decode("utf-8", "replace").rstrip())
-        code = await proc.wait()
-        _running_installs.pop(name, None)
-        logger.info("依赖安装结束 name=%s exit_code=%s", name, code)
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    env=env,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("启动依赖安装进程失败：%s", missing)
+                return
+            logger.info("开始安装 %s 的依赖：%s", name, ", ".join(missing))
+            assert proc.stdout is not None
+            async for raw in proc.stdout:
+                logger.info("[pip:%s] %s", name, raw.decode("utf-8", "replace").rstrip())
+            code = await proc.wait()
+            logger.info("依赖安装结束 name=%s exit_code=%s", name, code)
+        finally:
+            _running_installs.pop(name, None)
 
-    asyncio.create_task(_run(), name=f"pip-install-{name}")
+    task = asyncio.create_task(_run(), name=f"pip-install-{name}")
+    _running_installs[name] = task
+    _install_tasks.add(task)
+    task.add_done_callback(_install_tasks.discard)
     return {
         "ok": True,
         "started": True,

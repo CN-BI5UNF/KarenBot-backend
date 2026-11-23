@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-import importlib.util
+import ast
 import logging
 import re
 from dataclasses import dataclass, field
@@ -95,9 +95,56 @@ def find_persona_dir(paths: AppPaths, name: str) -> Path | None:
     """查找人格目录。返回 None 表示未找到。"""
     validate_persona_name(name)
     persona_dir = paths.PERSONAS_DIR / name
+    if persona_dir.is_symlink():
+        raise ValueError(f"拒绝加载符号链接人格目录: {persona_dir}")
     if (persona_dir / "persona_prompt.py").exists():
         return persona_dir
     return None
+
+
+def _load_persona_constants(path: Path) -> tuple[str, dict[str, Any]]:
+    """Parse only literal persona exports; persona files are untrusted data."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeError) as exc:
+        raise ValueError(f"无法解析 {path}: {exc}") from exc
+
+    values: dict[str, Any] = {}
+    for statement in tree.body:
+        if (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and isinstance(statement.value.value, str)
+        ):
+            continue
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            target = statement.targets[0]
+            value_node = statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            target = statement.target
+            value_node = statement.value
+        else:
+            raise ValueError(f"{path} 只允许定义静态 PERSONA_PROMPT / PERSONA_VARS")
+
+        if not isinstance(target, ast.Name) or target.id not in {
+            "PERSONA_PROMPT",
+            "PERSONA_VARS",
+        }:
+            raise ValueError(f"{path} 只允许定义静态 PERSONA_PROMPT / PERSONA_VARS")
+        if value_node is None or target.id in values:
+            raise ValueError(f"{path} 的 {target.id} 必须且只能定义一次")
+        try:
+            values[target.id] = ast.literal_eval(value_node)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError) as exc:
+            raise ValueError(f"{path} 的 {target.id} 必须是字面量") from exc
+
+    prompt = values.get("PERSONA_PROMPT")
+    persona_vars = values.get("PERSONA_VARS", {})
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError(f"{path} 缺少 PERSONA_PROMPT 字符串或为空")
+    if not isinstance(persona_vars, dict):
+        raise ValueError(f"{path} 的 PERSONA_VARS 必须是字典")
+    return prompt, persona_vars
 
 
 def load_persona(paths: AppPaths, name: str) -> Persona:
@@ -110,21 +157,9 @@ def load_persona(paths: AppPaths, name: str) -> Persona:
         )
 
     persona_file = persona_dir / "persona_prompt.py"
-    spec = importlib.util.spec_from_file_location(f"_persona_{name}", persona_file)
-    if spec is None or spec.loader is None:
-        raise ValueError(f"无法加载 {persona_file}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    prompt = getattr(module, "PERSONA_PROMPT", None)
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ValueError(f"{persona_file} 缺少 PERSONA_PROMPT 字符串或为空")
-
-    persona_vars = getattr(module, "PERSONA_VARS", {})
-    if not isinstance(persona_vars, dict):
-        logger.warning(f"{persona_file} 的 PERSONA_VARS 不是 dict，忽略")
-        persona_vars = {}
+    if persona_file.is_symlink():
+        raise ValueError(f"拒绝加载符号链接人格文件: {persona_file}")
+    prompt, persona_vars = _load_persona_constants(persona_file)
 
     return Persona(
         name=name,

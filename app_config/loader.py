@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import logging
 import shutil
+import os
+import tempfile
+import threading
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +33,15 @@ from .paths import AppPaths
 from .schema import RootConfig
 
 logger = logging.getLogger(__name__)
+
+_CONFIG_SAVE_LOCKS: dict[Path, threading.RLock] = {}
+_CONFIG_SAVE_LOCKS_LOCK = threading.Lock()
+
+
+def _config_save_lock(path: Path) -> threading.RLock:
+    key = path.resolve()
+    with _CONFIG_SAVE_LOCKS_LOCK:
+        return _CONFIG_SAVE_LOCKS.setdefault(key, threading.RLock())
 
 _active_config: RootConfig | None = None
 _MAX_FUTURE_CONFIG_PRUNE_PASSES = 20
@@ -147,6 +159,20 @@ def _save_config_data(
     backup: bool,
     existing_text: str | None = None,
 ) -> None:
+    lock = _config_save_lock(paths.CONFIG_FILE)
+    with lock:
+        _save_config_data_locked(
+            paths, data, backup=backup, existing_text=existing_text
+        )
+
+
+def _save_config_data_locked(
+    paths: AppPaths,
+    data: dict[str, Any],
+    *,
+    backup: bool,
+    existing_text: str | None = None,
+) -> None:
     paths.ensure_data_dirs()
     paths.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -161,10 +187,18 @@ def _save_config_data(
         if existing_text is None
         else dump_config_preserving_comments(existing_text, data)
     )
-    tmp_path = paths.CONFIG_FILE.with_suffix(".yaml.tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(text)
-    tmp_path.replace(paths.CONFIG_FILE)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{paths.CONFIG_FILE.name}.", suffix=".tmp", dir=paths.CONFIG_FILE.parent
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp_path.replace(paths.CONFIG_FILE)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _log_migration_report(report: ConfigMigrationReport) -> None:

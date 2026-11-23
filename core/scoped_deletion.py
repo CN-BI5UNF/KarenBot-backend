@@ -26,10 +26,14 @@ import hmac
 import json
 import logging
 import os
+import re
 import sqlite3
+import stat
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -39,21 +43,78 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_QUARANTINE_HOURS = 24.0
 PREVIEW_TOKEN_TTL_SECONDS = 300.0
-_DEFAULT_SECRET_KEY = b"karen-scope-deletion-seal-v2.6"
+_PREVIEW_ID_RE = re.compile(r"^prev_[0-9a-f]{32}$")
+_OP_ID_RE = re.compile(r"^op_del_[0-9a-f]{32}$")
 
 
-def _get_secret_key() -> bytes:
+def _get_secret_key(quarantine_dir: Path) -> bytes:
     env_key = os.environ.get("KAREN_SCOPE_DELETION_KEY") or os.environ.get(
         "DEBATA_SCOPE_DELETION_KEY"
     )
     if env_key:
-        return env_key.encode("utf-8")
-    return _DEFAULT_SECRET_KEY
+        return hashlib.sha256(env_key.encode("utf-8")).digest()
+
+    key_path = quarantine_dir / ".scope-deletion.key"
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(key_path, flags)
+    except FileNotFoundError:
+        key = os.urandom(32)
+        create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(key_path, create_flags, 0o600)
+        except FileExistsError:
+            fd = os.open(key_path, flags)
+        else:
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(key)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except Exception:
+                key_path.unlink(missing_ok=True)
+                raise
+            return key
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ScopedDeletionError("seal_key_invalid", "隔离令牌密钥文件无效")
+        data = bytearray()
+        while len(data) < 33:
+            chunk = os.read(fd, 33 - len(data))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) != 32:
+            raise ScopedDeletionError("seal_key_invalid", "隔离令牌密钥文件无效")
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        return bytes(data)
+    finally:
+        os.close(fd)
 
 
 def _chunked(items: list[Any], chunk_size: int = 200) -> list[list[Any]]:
     """将列表安全切分为固定大小的批次。"""
     return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
+def _close_managed_connections(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        previous = getattr(self._connection_local, "active", None)
+        active: list[sqlite3.Connection] = []
+        self._connection_local.active = active
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            for conn in reversed(active):
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+            self._connection_local.active = previous
+
+    return wrapped
 
 
 class ScopedDeletionError(RuntimeError):
@@ -177,6 +238,7 @@ class ScopedDeletionManager:
         quarantine_dir: Path | str | None = None,
     ) -> None:
         self._db_or_conn = db
+        self._connection_local = threading.local()
         if quarantine_dir is not None:
             self.quarantine_dir = Path(quarantine_dir)
         elif isinstance(db, (str, Path)):
@@ -186,7 +248,24 @@ class ScopedDeletionManager:
         else:
             self.quarantine_dir = Path("./data/quarantine")
         self.quarantine_dir.mkdir(parents=True, exist_ok=True)
+        self._secret_key = _get_secret_key(self.quarantine_dir)
         self._ensure_schema()
+
+    def _quarantine_path(self, identifier: str, *, kind: str) -> Path:
+        if kind == "preview":
+            valid = _PREVIEW_ID_RE.fullmatch(identifier)
+            suffix = ".preview.json"
+        elif kind == "manifest":
+            valid = _OP_ID_RE.fullmatch(identifier)
+            suffix = ".manifest.json"
+        else:
+            raise ValueError(f"unknown quarantine file kind: {kind}")
+        if not valid:
+            raise ScopedDeletionError("invalid_id", "隔离文件标识格式非法")
+        path = self.quarantine_dir / f"{identifier}{suffix}"
+        if path.is_symlink() or path.parent.resolve() != self.quarantine_dir.resolve():
+            raise ScopedDeletionError("invalid_path", "隔离文件路径无效")
+        return path
 
     def _get_connection(self) -> sqlite3.Connection:
         if isinstance(self._db_or_conn, sqlite3.Connection):
@@ -194,8 +273,13 @@ class ScopedDeletionManager:
         if isinstance(self._db_or_conn, KarenDB):
             return self._db_or_conn.connect()
         karen_db = KarenDB(self._db_or_conn)
-        return karen_db.connect()
+        conn = karen_db.connect()
+        active = getattr(self._connection_local, "active", None)
+        if active is not None:
+            active.append(conn)
+        return conn
 
+    @_close_managed_connections
     def _ensure_schema(self) -> None:
         conn = self._get_connection()
         conn.execute(
@@ -234,7 +318,7 @@ class ScopedDeletionManager:
     # ------------------------------------------------------------------
     def _create_token(self, preview_id: str, digest: str, expires_at: float) -> str:
         payload = f"{preview_id}:{digest}:{int(expires_at)}"
-        sig = hmac.new(_get_secret_key(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        sig = hmac.new(self._secret_key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
         return f"{payload}:{sig}"
 
     def _verify_token(self, token: str) -> tuple[str, str, float]:
@@ -247,7 +331,7 @@ class ScopedDeletionManager:
             if time.time() > expires_at:
                 raise ScopedDeletionError("preview_token_expired", "删除预览已超时失效，请重新生成预览")
             payload = f"{preview_id}:{digest}:{int(expires_at)}"
-            expected_sig = hmac.new(_get_secret_key(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+            expected_sig = hmac.new(self._secret_key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
             if not hmac.compare_digest(sig, expected_sig):
                 raise ScopedDeletionError("preview_token_invalid", "删除预览签名校验失败")
             return preview_id, digest, expires_at
@@ -257,6 +341,7 @@ class ScopedDeletionManager:
     # ------------------------------------------------------------------
     # 1. 范围删除预览（Preview）
     # ------------------------------------------------------------------
+    @_close_managed_connections
     def preview_scope_deletion(
         self,
         scope: DeletionScope,
@@ -380,7 +465,7 @@ class ScopedDeletionManager:
         preview_token = self._create_token(preview_id, selection_digest, expires_at)
 
         # 暂存预览元数据供执行时二次对账
-        preview_meta_file = self.quarantine_dir / f"{preview_id}.preview.json"
+        preview_meta_file = self._quarantine_path(preview_id, kind="preview")
         preview_data = {
             "preview_id": preview_id,
             "persona_id": persona_id,
@@ -416,6 +501,7 @@ class ScopedDeletionManager:
     # ------------------------------------------------------------------
     # 2. 原子墓碑提交（Execute）与即时读屏障
     # ------------------------------------------------------------------
+    @_close_managed_connections
     def execute_scope_deletion(
         self,
         preview_token: str,
@@ -425,7 +511,7 @@ class ScopedDeletionManager:
         """根据已校验的预览凭证，原子化写入墓碑、增代次并置入受控隔离区。"""
         preview_id, digest, _ = self._verify_token(preview_token)
 
-        preview_meta_file = self.quarantine_dir / f"{preview_id}.preview.json"
+        preview_meta_file = self._quarantine_path(preview_id, kind="preview")
         if not preview_meta_file.exists():
             raise ScopedDeletionError("preview_not_found", "未找到对应的删除预览，请重新预览")
 
@@ -547,6 +633,7 @@ class ScopedDeletionManager:
     # ------------------------------------------------------------------
     # 读屏障（Read Fence）：即时过滤已删除记录
     # ------------------------------------------------------------------
+    @_close_managed_connections
     def is_tombstoned(self, persona_id: str, record_uuid: str) -> bool:
         """检查特定记录是否处于墓碑状态。"""
         conn = self._get_connection()
@@ -556,6 +643,7 @@ class ScopedDeletionManager:
         ).fetchone()
         return row is not None
 
+    @_close_managed_connections
     def filter_visible_records(
         self,
         persona_id: str,
@@ -586,6 +674,7 @@ class ScopedDeletionManager:
     # ------------------------------------------------------------------
     # 3. 受控隔离恢复（Restore with new life_epoch）
     # ------------------------------------------------------------------
+    @_close_managed_connections
     def restore_scope_deletion(self, op_id: str) -> RestorationResult:
         """在受控隔离期内恢复已删记录。
 
@@ -594,7 +683,7 @@ class ScopedDeletionManager:
         - 清除对应墓碑；
         - 绝不重新执行外部工具动作或重发外部消息。
         """
-        manifest_path = self.quarantine_dir / f"{op_id}.manifest.json"
+        manifest_path = self._quarantine_path(op_id, kind="manifest")
         if not manifest_path.exists():
             raise ScopedDeletionError("manifest_not_found", f"未找到隔离清单: {op_id}")
 
@@ -669,9 +758,10 @@ class ScopedDeletionManager:
     # ------------------------------------------------------------------
     # 4. 物理清理（Purge）
     # ------------------------------------------------------------------
+    @_close_managed_connections
     def purge_scope_deletion(self, op_id: str) -> PurgeResult:
         """物理清除隔离期已过或用户明确销毁的记录。明确不可逆。"""
-        manifest_path = self.quarantine_dir / f"{op_id}.manifest.json"
+        manifest_path = self._quarantine_path(op_id, kind="manifest")
         if not manifest_path.exists():
             raise ScopedDeletionError("manifest_not_found", f"未找到隔离清单: {op_id}")
 
@@ -754,6 +844,7 @@ class ScopedDeletionManager:
     # ------------------------------------------------------------------
     # 5. 人格上下文重置（Context Reset）
     # ------------------------------------------------------------------
+    @_close_managed_connections
     def reset_persona_context(self, persona_id: str) -> ContextResetResult:
         """重置人格上下文记忆视图。
 

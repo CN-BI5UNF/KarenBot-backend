@@ -345,15 +345,16 @@ def verify_backup(
                             if handle.read(16) != b"SQLite format 3\x00":
                                 _error(errors, "sqlite_header", f"SQLite 头非法：{name}")
                             else:
-                                ok, detail = _sqlite_quick_check(temp_path)
-                                sqlite_checked += 1
-                                if not ok:
-                                    _error(
-                                        errors,
-                                        "sqlite_check_failed",
-                                        f"SQLite quick_check 失败：{name} {detail}",
-                                    )
-                                elif name.startswith("data/memory/"):
+                                if deep_sqlite:
+                                    ok, detail = _sqlite_quick_check(temp_path)
+                                    sqlite_checked += 1
+                                    if not ok:
+                                        _error(
+                                            errors,
+                                            "sqlite_check_failed",
+                                            f"SQLite quick_check 失败：{name} {detail}",
+                                        )
+                                if deep_sqlite and name.startswith("data/memory/"):
                                     from core.d01 import ledger_evidence
 
                                     ledger_probes.append(

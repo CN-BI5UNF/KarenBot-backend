@@ -95,20 +95,21 @@ class OneBot11ApiCaller:
         payload = {"action": action, "params": params or {}, "echo": echo}
 
         try:
-            await conn.send(payload, self_id=self_id)
-        except Exception as e:
-            self._pending.pop(echo, None)
-            raise AdapterAPIError(f"发送 API 请求失败: {e}") from e
+            try:
+                await conn.send(payload, self_id=self_id)
+            except Exception as e:
+                raise AdapterAPIError(f"发送 API 请求失败: {e}") from e
 
-        try:
-            response = await asyncio.wait_for(
-                future,
-                timeout=timeout if timeout is not None else self.default_timeout,
-            )
-        except asyncio.TimeoutError:
+            try:
+                response = await asyncio.wait_for(
+                    future,
+                    timeout=timeout if timeout is not None else self.default_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("API 调用超时: %s (echo=%s)", action, echo)
+                raise
+        finally:
             self._pending.pop(echo, None)
-            logger.warning("API 调用超时: %s (echo=%s)", action, echo)
-            raise
 
         status = response.get("status", "")
         retcode = response.get("retcode", -1)

@@ -173,13 +173,17 @@ async def set_group_leave(args: SetGroupLeaveArgs, ctx: ToolContext) -> dict:
     group_id = _resolve_group_id(args.group_id, ctx)
     if group_id is None:
         return _failed("退群需要明确当前群号。", status="need_group_id")
-    if ctx.conversation_id and ctx.conversation_id.startswith("group:"):
-        current_group = ctx.conversation_id.split(":", 1)[1]
-        if str(group_id) != current_group:
-            return _failed(
-                "退群只能作用于当前群聊，不能跨群退群。",
-                status="target_mismatch",
-            )
+    if not (ctx.conversation_id or "").startswith("group:"):
+        return _failed(
+            "只能在当前群聊中执行退群。",
+            status="target_mismatch",
+        )
+    current_group = ctx.conversation_id.split(":", 1)[1]
+    if str(group_id) != current_group:
+        return _failed(
+            "退群只能作用于当前群聊，不能跨群退群。",
+            status="target_mismatch",
+        )
     permission = await _require_group_member(ctx, str(group_id))
     if permission is not None:
         return permission
@@ -284,6 +288,13 @@ async def _get_group_self_role(ctx: ToolContext, group_id: str) -> dict[str, Any
             "error": str(e),
         }
 
+    if not isinstance(data, dict):
+        return {
+            "group_id": str(group_id),
+            "self_id": self_id,
+            "role": "unknown",
+            "error": "适配器返回了无效的群成员信息",
+        }
     role = _normalize_group_role(data.get("role"))
     info = {
         "group_id": str(group_id),

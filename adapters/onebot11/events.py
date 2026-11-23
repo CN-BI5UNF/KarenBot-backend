@@ -74,6 +74,7 @@ def _parse_message(
         message_id = str(raw["message_id"])
         user_id = str(raw["user_id"])
         self_id = str(raw.get("self_id", ""))
+        group_id = str(raw["group_id"]) if msg_type == "group" else None
     except KeyError as e:
         logger.warning("消息事件缺字段: %s", e)
         return None
@@ -88,8 +89,6 @@ def _parse_message(
         if msg_type == "group"
         else sender.get("nickname") or "未知"
     )
-    group_id = str(raw["group_id"]) if msg_type == "group" else None
-
     raw_message_str = raw.get("raw_message", "") or ""
     message_payload = raw.get("message", []) or []
     segments = segments_from_onebot(message_payload, raw_message_str)

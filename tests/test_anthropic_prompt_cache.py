@@ -137,8 +137,11 @@ def test_chat_completion_injects_system_tools_and_message_breakpoints() -> None:
     provider = _provider()
     captured: dict[str, Any] = {}
 
-    async def fake_stream(kwargs: dict[str, Any], first_token_timeout: float | None):
+    async def fake_stream(
+        kwargs: dict[str, Any], first_token_timeout: float | None, timeout: float
+    ):
         captured.update(kwargs)
+        captured["timeout"] = timeout
         return CompletionResult(content="ok")
 
     provider._stream_call = fake_stream  # type: ignore[method-assign]
@@ -185,14 +188,18 @@ def test_chat_completion_injects_system_tools_and_message_breakpoints() -> None:
         "type": "ephemeral"
     }
     assert "cache_control" not in captured["messages"][2]["content"]
+    assert captured["timeout"] == 120.0
 
 
 def test_chat_completion_without_tail_marker_only_caches_tools_and_system() -> None:
     provider = _provider()
     captured: dict[str, Any] = {}
 
-    async def fake_stream(kwargs: dict[str, Any], first_token_timeout: float | None):
+    async def fake_stream(
+        kwargs: dict[str, Any], first_token_timeout: float | None, timeout: float
+    ):
         captured.update(kwargs)
+        captured["timeout"] = timeout
         return CompletionResult(content="ok")
 
     provider._stream_call = fake_stream  # type: ignore[method-assign]
@@ -223,6 +230,7 @@ def test_chat_completion_without_tail_marker_only_caches_tools_and_system() -> N
     assert isinstance(captured["system"], list)
     assert "cache_control" in captured["tools"][-1]
     assert "cache_control" not in captured["messages"][0]["content"]
+    assert captured["timeout"] == 120.0
 
 
 def test_cache_control_rejection_detection_and_strip() -> None:

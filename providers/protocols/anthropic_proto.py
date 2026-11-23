@@ -173,12 +173,16 @@ class AnthropicProvider(IProvider):
 
         if extra:
             kwargs.update(extra)
+        thinking = kwargs.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+            kwargs["temperature"] = 1
+            kwargs.pop("top_p", None)
 
         try:
             try:
                 if stream:
-                    return await self._stream_call(kwargs, first_token_timeout)
-                return await self._nonstream_call(kwargs)
+                    return await self._stream_call(kwargs, first_token_timeout, timeout)
+                return await self._nonstream_call(kwargs, timeout)
             except APIError as e:
                 # prompt caching 是可选优化：少数 Anthropic 兼容中转站会
                 # 直接 400 拒绝 cache_control。此时去掉断点重试一次，不能
@@ -191,8 +195,10 @@ class AnthropicProvider(IProvider):
                 )
                 fallback_kwargs = _strip_cache_control(kwargs)
                 if stream:
-                    return await self._stream_call(fallback_kwargs, first_token_timeout)
-                return await self._nonstream_call(fallback_kwargs)
+                    return await self._stream_call(
+                        fallback_kwargs, first_token_timeout, timeout
+                    )
+                return await self._nonstream_call(fallback_kwargs, timeout)
         except AuthenticationError as e:
             raise ProviderAuthError(
                 f"{self.name}: 认证失败: {safe_provider_error_text(e)}"
@@ -268,7 +274,18 @@ class AnthropicProvider(IProvider):
                     }
                 ]
                 # tool_result 必须放在 user 角色下
-                result.append({"role": "user", "content": blocks})
+                if (
+                    result
+                    and result[-1].get("role") == "user"
+                    and isinstance(result[-1].get("content"), list)
+                    and all(
+                        isinstance(block, dict) and block.get("type") == "tool_result"
+                        for block in result[-1]["content"]
+                    )
+                ):
+                    result[-1]["content"].extend(blocks)
+                else:
+                    result.append({"role": "user", "content": blocks})
                 if source_index == last_stable_source:
                     break_at = len(result)
                 continue
@@ -352,12 +369,17 @@ class AnthropicProvider(IProvider):
     # 流 / 非流调用
     # ============================================================
 
-    async def _nonstream_call(self, kwargs: dict[str, Any]) -> CompletionResult:
-        response = await self._client.messages.create(**kwargs)
+    async def _nonstream_call(
+        self, kwargs: dict[str, Any], timeout: float
+    ) -> CompletionResult:
+        response = await self._client.messages.create(**kwargs, timeout=timeout)
         return self._build_result_from_response(response, kwargs.get("model", ""))
 
     async def _stream_call(
-        self, kwargs: dict[str, Any], first_token_timeout: float | None
+        self,
+        kwargs: dict[str, Any],
+        first_token_timeout: float | None,
+        timeout: float,
     ) -> CompletionResult:
         # 走的是 client.messages.stream()，流式已经由方法本身决定，
         # 不能再往 kwargs 里塞 stream —— AsyncMessages.stream() 没有这个形参，
@@ -366,7 +388,7 @@ class AnthropicProvider(IProvider):
         events: list[Any] = []
 
         try:
-            async with self._client.messages.stream(**kwargs) as stream:
+            async with self._client.messages.stream(**kwargs, timeout=timeout) as stream:
                 iterator = stream.__aiter__()
                 try:
                     if first_token_timeout is not None:

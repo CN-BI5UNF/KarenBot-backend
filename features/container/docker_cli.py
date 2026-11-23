@@ -18,10 +18,15 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass
+from typing import BinaryIO
 
 logger = logging.getLogger(__name__)
 
 _READ_CHUNK = 64 * 1024
+
+
+class DockerOutputError(OSError):
+    """A Docker command's streamed output could not be written locally."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +36,7 @@ class CommandResult:
     stderr: str
     truncated: bool = False
     timed_out: bool = False
+    stdout_truncated: bool = False
 
 
 class DockerCLI:
@@ -60,10 +66,17 @@ class DockerCLI:
         timeout: float = 30.0,
         max_output_bytes: int = 256 * 1024,
         terminate_on_truncate: bool = True,
+        stdout_file: BinaryIO | None = None,
+        stdout_limit: int | None = None,
     ) -> CommandResult:
         if not args:
             raise ValueError("docker args must not be empty")
         cap = max(1024, int(max_output_bytes))
+        out_cap = (
+            max(0, int(stdout_limit))
+            if stdout_file is not None and stdout_limit is not None
+            else cap
+        )
         stdin = asyncio.subprocess.PIPE if input_bytes is not None else asyncio.subprocess.DEVNULL
         proc = await asyncio.create_subprocess_exec(
             self.binary,
@@ -85,18 +98,40 @@ class DockerCLI:
                 with contextlib.suppress(Exception):
                     proc.stdin.close()
 
-        async def collect(stream: asyncio.StreamReader | None) -> tuple[bytes, bool]:
+        output_error: OSError | None = None
+
+        async def collect(
+            stream: asyncio.StreamReader | None,
+            *,
+            limit: int,
+            sink: BinaryIO | None = None,
+        ) -> tuple[bytes, bool]:
+            nonlocal output_error
             if stream is None:
                 return b"", False
             buffer = bytearray()
+            written = 0
             truncated = False
             while True:
                 chunk = await stream.read(_READ_CHUNK)
                 if not chunk:
                     break
-                remaining = cap - len(buffer)
+                remaining = limit - (written if sink is not None else len(buffer))
                 if remaining > 0:
-                    buffer.extend(chunk[:remaining])
+                    accepted = chunk[:remaining]
+                    if sink is None:
+                        buffer.extend(accepted)
+                    elif output_error is None:
+                        try:
+                            sink.write(accepted)
+                        except OSError as exc:
+                            output_error = exc
+                            truncated = True
+                            if terminate_on_truncate:
+                                with contextlib.suppress(ProcessLookupError):
+                                    proc.terminate()
+                        else:
+                            written += len(accepted)
                 if len(chunk) > remaining:
                     truncated = True
                     if terminate_on_truncate:
@@ -109,8 +144,10 @@ class DockerCLI:
             return bytes(buffer), truncated
 
         feed_task = asyncio.create_task(feed())
-        out_task = asyncio.create_task(collect(proc.stdout))
-        err_task = asyncio.create_task(collect(proc.stderr))
+        out_task = asyncio.create_task(
+            collect(proc.stdout, limit=out_cap, sink=stdout_file)
+        )
+        err_task = asyncio.create_task(collect(proc.stderr, limit=cap))
         timed_out = False
         try:
             await asyncio.wait_for(proc.wait(), timeout=max(0.1, timeout))
@@ -139,12 +176,15 @@ class DockerCLI:
                 stderr, err_truncated = await err_task
             except Exception:  # noqa: BLE001
                 stderr, err_truncated = b"", True
+        if output_error is not None:
+            raise DockerOutputError(str(output_error)) from output_error
         return CommandResult(
             returncode=int(proc.returncode if proc.returncode is not None else -1),
             stdout=stdout.decode("utf-8", "replace"),
             stderr=stderr.decode("utf-8", "replace"),
             truncated=out_truncated or err_truncated,
             timed_out=timed_out,
+            stdout_truncated=out_truncated,
         )
 
 

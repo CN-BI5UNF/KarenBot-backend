@@ -212,6 +212,8 @@ class OpenAICompatProvider(IProvider):
 
     async def _chat_nonstream(self, kwargs: dict[str, Any]) -> CompletionResult:
         response = await self._client.chat.completions.create(**kwargs)
+        if not response.choices:
+            raise ProviderError(f"{self.name}: 非流式响应没有 choices")
         choice = response.choices[0]
         msg = choice.message
 
@@ -237,26 +239,26 @@ class OpenAICompatProvider(IProvider):
         stream = await self._client.chat.completions.create(**kwargs)
 
         chunks: list[Any] = []
-        iterator = stream.__aiter__()
+        async with stream:
+            iterator = stream.__aiter__()
+            try:
+                if first_token_timeout is not None:
+                    first_chunk = await asyncio.wait_for(
+                        anext(iterator), timeout=first_token_timeout
+                    )
+                else:
+                    first_chunk = await anext(iterator)
+            except asyncio.TimeoutError:
+                raise ProviderTimeoutError(
+                    f"{self.name}: 首 token 超时 ({first_token_timeout}s)"
+                ) from None
+            except StopAsyncIteration:
+                first_chunk = None
 
-        try:
-            if first_token_timeout is not None:
-                first_chunk = await asyncio.wait_for(
-                    anext(iterator), timeout=first_token_timeout
-                )
-            else:
-                first_chunk = await anext(iterator)
-        except asyncio.TimeoutError:
-            raise ProviderTimeoutError(
-                f"{self.name}: 首 token 超时 ({first_token_timeout}s)"
-            ) from None
-        except StopAsyncIteration:
-            first_chunk = None
-
-        if first_chunk is not None:
-            chunks.append(first_chunk)
-            async for chunk in iterator:
-                chunks.append(chunk)
+            if first_chunk is not None:
+                chunks.append(first_chunk)
+                async for chunk in iterator:
+                    chunks.append(chunk)
 
         if not chunks:
             raise ProviderError(f"{self.name}: 流式输出无数据")

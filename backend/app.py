@@ -192,11 +192,11 @@ def _install_websocket_events(app: FastAPI) -> None:
     async def ws_events(websocket: WebSocket) -> None:
         """一条连接同时收 log / chat / status 三类事件。"""
         auth: TokenAuth = websocket.app.state.auth
+        await websocket.accept()
         if not auth.websocket_authorized(websocket):
             await websocket.close(code=4401, reason="unauthorized")
             return
 
-        await websocket.accept()
         hub: EventHub = websocket.app.state.hub
         queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1000)
         hub.register(queue)

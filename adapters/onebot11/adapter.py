@@ -798,6 +798,10 @@ class OneBot11Adapter(IAdapter):
 
     async def get_forward_msg(self, forward_id: str) -> list[dict[str, Any]]:
         data = await self._api.call("get_forward_msg", {"id": forward_id})
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        if not isinstance(data, dict):
+            return []
         messages = data.get("messages", [])
         return messages if isinstance(messages, list) else []
 
@@ -810,6 +814,10 @@ class OneBot11Adapter(IAdapter):
         data = await self._api.call(
             action, {"group_id": _wire_id(group_id), "count": count}
         )
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        if not isinstance(data, dict):
+            return []
         messages = data.get("messages", [])
         return messages if isinstance(messages, list) else []
 

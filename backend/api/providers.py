@@ -357,6 +357,7 @@ async def _do_test(target: Any) -> dict[str, Any]:
             base_url=target.base_url,
             api_key=target.api_key,
             model=target.model,
+            public_only=getattr(target, "public_only", False),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception("测试未保存的 provider 配置失败")
@@ -389,6 +390,7 @@ async def _fetch_models(target: Any, provider_id: str) -> dict[str, Any]:
             target.protocol,
             provider_id=provider_id,
             vendor=getattr(target, "vendor", ""),
+            public_only=getattr(target, "public_only", False),
         )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(e)) from e

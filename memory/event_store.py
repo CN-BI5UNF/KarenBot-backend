@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 import uuid
 from collections.abc import Iterable, Mapping
@@ -16,6 +17,14 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class _ClosingSQLiteConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
 
 
 @dataclass(slots=True)
@@ -72,6 +81,8 @@ class EventStore:
         self._projection_batch_size = max(1, int(projection_batch_size))
         self._max_pending_events = max(1, int(max_pending_events))
         self._projection_retry_delay = max(0.001, float(projection_retry_delay))
+        self._schema_lock = threading.Lock()
+        self._schema_ready = False
 
         self._append_lock = asyncio.Lock()
         self._sqlite_lock = asyncio.Lock()
@@ -490,14 +501,19 @@ class EventStore:
 
     def _connect(self, *, ensure_schema: bool = True) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path, timeout=30.0)
+        conn = sqlite3.connect(
+            self.path, timeout=30.0, factory=_ClosingSQLiteConnection
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
         if ensure_schema:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            self._ensure_schema(conn)
+            with self._schema_lock:
+                if not self._schema_ready:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    self._ensure_schema(conn)
+                    self._schema_ready = True
         return conn
 
     @staticmethod

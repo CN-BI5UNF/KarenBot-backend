@@ -543,7 +543,7 @@ class TelegramAdapter(IAdapter):
                     f'<a href="tg://user?id={html.escape(segment.user_id, quote=True)}">'
                     f"@{html.escape(name, quote=False)}</a>"
                 )
-            return f"@{name}"
+            return self._escape_text(f"@{name}")
         if isinstance(segment, FaceSegment):
             return self._escape_text(segment.label or f"[face:{segment.face_id}]")
         if isinstance(segment, RawSegment):
@@ -639,7 +639,7 @@ class TelegramAdapter(IAdapter):
             if not file_path.exists():
                 logger.warning("Telegram 媒体文件不存在: %s", file_path.name)
                 return None
-            files = {field: media_upload(file_path)}
+            files = {field: await asyncio.to_thread(media_upload, file_path)}
         elif b64:
             try:
                 raw = base64.b64decode(

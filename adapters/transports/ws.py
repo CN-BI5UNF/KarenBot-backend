@@ -129,6 +129,9 @@ class WSConnection(ABC):
             raise
 
     async def _dispatch_received(self, data: dict) -> None:
+        if not isinstance(data, dict):
+            logger.warning("OneBot11 WS 忽略非对象 JSON 帧: %s", type(data).__name__)
+            return
         if data.get("echo"):
             await self._dispatch(data)
             return
@@ -382,6 +385,9 @@ class WSClientConnection(WSConnection):
                             data = json.loads(raw)
                         except json.JSONDecodeError as e:
                             logger.warning(f"OneBot11 消息 JSON 解析失败: {e}")
+                            continue
+                        if not isinstance(data, dict):
+                            logger.warning("OneBot11 WS 忽略非对象 JSON 帧: %s", type(data).__name__)
                             continue
                         if logger.isEnabledFor(logging.DEBUG):
                             logger.debug(
@@ -729,6 +735,9 @@ class WSServerConnection(WSConnection):
                     data = json.loads(raw)
                 except json.JSONDecodeError:
                     logger.warning("OneBot11 消息 JSON 解析失败，跳过")
+                    continue
+                if not isinstance(data, dict):
+                    logger.warning("OneBot11 WS 忽略非对象 JSON 帧: %s", type(data).__name__)
                     continue
                 await self._dispatch_received(data)
         finally:

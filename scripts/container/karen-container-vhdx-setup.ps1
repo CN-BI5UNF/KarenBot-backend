@@ -40,9 +40,11 @@ if ($MountPoint -notmatch '^([A-Za-z]):\\') {
 $Letter = $Matches[1].ToUpperInvariant()
 $VhdxPath = [System.IO.Path]::GetFullPath($VhdxPath)
 $MountPoint = [System.IO.Path]::GetFullPath($MountPoint)
+if ($VhdxPath -match '["\r\n]') {
+    throw "VhdxPath 不能包含双引号或换行符。"
+}
 $VhdxDir = [System.IO.Path]::GetDirectoryName($VhdxPath)
 New-Item -ItemType Directory -Force -Path $VhdxDir | Out-Null
-New-Item -ItemType Directory -Force -Path $MountPoint | Out-Null
 
 if (-not (Test-Path -LiteralPath $VhdxPath)) {
     $diskpartScript = Join-Path $env:TEMP ("karen-vhdx-" + [guid]::NewGuid().ToString("N") + ".txt")

@@ -178,9 +178,13 @@ class OpenAICompatEmbeddingService(IEmbeddingService):
         return data[0]["embedding"]
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
         if _is_volcengine_multimodal_embedding(self.model):
             return [await self.embed_one(text) for text in texts]
         data = await self._request(texts)
+        if all(isinstance(item.get("index"), int) for item in data):
+            data = sorted(data, key=lambda item: item["index"])
         return [item["embedding"] for item in data]
 
     async def aclose(self) -> None:

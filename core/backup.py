@@ -640,7 +640,10 @@ class BackupService:
             or ".." in name
         ):
             raise BackupError("invalid_name", "备份文件名不合法")
-        path = (self.directory / name).resolve()
+        raw_path = self.directory / name
+        if raw_path.is_symlink():
+            raise BackupError("not_found", "备份文件不存在")
+        path = raw_path.resolve()
         try:
             path.relative_to(self.directory.resolve())
         except ValueError:

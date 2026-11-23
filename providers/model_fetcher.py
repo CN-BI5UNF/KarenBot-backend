@@ -7,7 +7,6 @@ anthropic 协议返回已知模型列表（官方无 /models 端点）。
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,6 +15,7 @@ import httpx
 from utils.proxy_env import sanitize_no_proxy_env
 
 from .base import ProviderError
+from .safe_http import send_provider_request
 
 logger = logging.getLogger(__name__)
 
@@ -56,17 +56,15 @@ def _should_skip(model_id: str) -> bool:
     return any(lower.startswith(p) for p in _SKIP_PREFIXES)
 
 
-def _client_kwargs(timeout: float) -> dict[str, Any]:
+def _client_kwargs(timeout: float, *, public_only: bool = False) -> dict[str, Any]:
     """给 httpx 的客户端参数。
 
-    只开 ``trust_env``，**不**显式传 ``proxy=``：显式传参会盖掉 httpx 自己的
-    NO_PROXY 判定，用户写了 ``NO_PROXY=api.example.com`` 也会被硬塞进代理。
-    实测踩过：本机 HTTP(S)_PROXY 指向一个坏代理（TLS 握手 5 秒超时），用户
-    把中转站域名加进 NO_PROXY 想绕开，却在「获取模型列表」时照样超时——
-    因为这里又把代理塞回去了。交给 trust_env，httpx 会按 NO_PROXY 自行分流。
+    已保存 provider 沿用 ``trust_env``，让 httpx 按 NO_PROXY 分流；未保存的
+    公网探测禁用环境代理，避免代理把凭证转发到内网目标。
     """
-    sanitize_no_proxy_env()
-    return {"timeout": timeout, "trust_env": True}
+    if not public_only:
+        sanitize_no_proxy_env()
+    return {"timeout": timeout, "trust_env": not public_only}
 
 
 async def fetch_model_list(
@@ -74,6 +72,8 @@ async def fetch_model_list(
     api_key: str,
     protocol: str,
     timeout: float = 15.0,
+    *,
+    public_only: bool = False,
 ) -> list[str]:
     """从 provider 获取模型 ID 列表。
 
@@ -97,7 +97,9 @@ async def fetch_model_list(
         # 所以非官方端点先试远端，失败再退回内置清单。
         if not _is_official_anthropic(base_url):
             try:
-                remote = await _fetch_openai_style_models(base_url, api_key, timeout)
+                remote = await _fetch_openai_style_models(
+                    base_url, api_key, timeout, public_only=public_only
+                )
                 if remote:
                     return remote
             except ProviderError as e:
@@ -107,7 +109,9 @@ async def fetch_model_list(
     if protocol != "openai_compat":
         raise ProviderError(f"协议 {protocol!r} 不支持获取模型列表")
 
-    return await _fetch_openai_style_models(base_url, api_key, timeout)
+    return await _fetch_openai_style_models(
+        base_url, api_key, timeout, public_only=public_only
+    )
 
 
 def _is_official_anthropic(base_url: str) -> bool:
@@ -121,25 +125,35 @@ def _is_official_anthropic(base_url: str) -> bool:
 
 
 async def _fetch_openai_style_models(
-    base_url: str, api_key: str, timeout: float
+    base_url: str,
+    api_key: str,
+    timeout: float,
+    *,
+    public_only: bool = False,
 ) -> list[str]:
     """按 OpenAI 约定拉 GET {api_root}/models。"""
-    # 去掉 /v{N} 后缀得到 API 根路径
-    api_root = re.sub(r"/v\d+$", "", base_url)
-    url = f"{api_root}/models"
+    url = f"{base_url.rstrip('/')}/models"
 
     headers: dict[str, str] = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(**_client_kwargs(timeout)) as client:
+    async with httpx.AsyncClient(
+        **_client_kwargs(timeout, public_only=public_only)
+    ) as client:
         try:
-            resp = await client.get(url, headers=headers)
-        except httpx.TransportError as e:
-            raise ProviderError(f"网络不通：{e}") from e
+            resp = await send_provider_request(
+                client,
+                "GET",
+                url,
+                headers=headers,
+                public_only=public_only,
+            )
         except httpx.TimeoutException as e:
             raise ProviderError("请求超时，请检查网络或换一个更短的超时") from e
+        except httpx.TransportError as e:
+            raise ProviderError(f"网络不通：{e}") from e
 
         if resp.status_code == 401 or resp.status_code == 403:
             raise ProviderError("鉴权失败，请检查 API 密钥是否正确")
@@ -149,15 +163,15 @@ async def _fetch_openai_style_models(
             raise ProviderError(f"服务器返回 HTTP {resp.status_code}")
 
         try:
-            data: dict[str, Any] = resp.json()
+            data: Any = resp.json()
         except Exception as e:
             raise ProviderError("响应不是合法 JSON") from e
 
         # 尝试多种响应格式
         models_raw: list[dict[str, Any]] = []
-        if "data" in data and isinstance(data["data"], list):
+        if isinstance(data, dict) and isinstance(data.get("data"), list):
             models_raw = data["data"]
-        elif "models" in data and isinstance(data["models"], list):
+        elif isinstance(data, dict) and isinstance(data.get("models"), list):
             models_raw = data["models"]
         elif isinstance(data, list):
             models_raw = data
@@ -191,13 +205,20 @@ async def fetch_model_infos(
     provider_id: str = "",
     vendor: str = "",
     timeout: float = 15.0,
+    public_only: bool = False,
 ) -> list[FetchedModel]:
     """获取模型列表，并用本地能力矩阵补齐能力字段。
 
     远程 /models 通常只返回 ID；能力信息由 providers/model_capabilities.yaml
     确定性补充。未知模型不猜能力，只保留 ID。
     """
-    ids = await fetch_model_list(base_url, api_key, protocol, timeout=timeout)
+    ids = await fetch_model_list(
+        base_url,
+        api_key,
+        protocol,
+        timeout=timeout,
+        public_only=public_only,
+    )
     return [
         _fetched_model(mid, provider_id=provider_id, vendor=vendor) for mid in ids
     ]

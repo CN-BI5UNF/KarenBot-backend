@@ -28,6 +28,8 @@ import base64
 import logging
 import os
 import secrets as _stdlib_secrets
+import tempfile
+from pathlib import Path
 
 import orjson
 from cryptography.hazmat.primitives import hashes, serialization
@@ -337,21 +339,20 @@ class SecretsManager:
 
     def _save_rsa_private_to_file(self, private_pem: str) -> None:
         self.paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = self.paths.RSA_PRIVATE_KEY_FILE.with_suffix(".pem.tmp")
-        tmp.write_text(private_pem, encoding="ascii")
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{self.paths.RSA_PRIVATE_KEY_FILE.name}.",
+            suffix=".tmp",
+            dir=self.paths.RSA_PRIVATE_KEY_FILE.parent,
+        )
+        tmp = Path(tmp_name)
         try:
-            os.chmod(tmp, 0o600)
-        except OSError as e:
-            logger.warning("设置本地 RSA 私钥权限失败 %s: %s", tmp, e)
-        tmp.replace(self.paths.RSA_PRIVATE_KEY_FILE)
-        try:
-            os.chmod(self.paths.RSA_PRIVATE_KEY_FILE, 0o600)
-        except OSError as e:
-            logger.warning(
-                "设置本地 RSA 私钥权限失败 %s: %s",
-                self.paths.RSA_PRIVATE_KEY_FILE,
-                e,
-            )
+            with os.fdopen(fd, "w", encoding="ascii") as stream:
+                stream.write(private_pem)
+                stream.flush()
+                os.fsync(stream.fileno())
+            tmp.replace(self.paths.RSA_PRIVATE_KEY_FILE)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def _load_rsa_private_from_file(self) -> str | None:
         if not self.paths.RSA_PRIVATE_KEY_FILE.exists():
@@ -449,9 +450,20 @@ class SecretsManager:
             raise SecretsError(f"secrets.enc 格式损坏: {e}") from e
 
     def _save_records(self) -> None:
-        tmp = self.paths.SECRETS_FILE.with_suffix(".enc.tmp")
-        tmp.write_bytes(orjson.dumps(self._records, option=orjson.OPT_INDENT_2))
-        tmp.replace(self.paths.SECRETS_FILE)  # 原子替换
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{self.paths.SECRETS_FILE.name}.",
+            suffix=".tmp",
+            dir=self.paths.SECRETS_FILE.parent,
+        )
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(orjson.dumps(self._records, option=orjson.OPT_INDENT_2))
+                stream.flush()
+                os.fsync(stream.fileno())
+            tmp.replace(self.paths.SECRETS_FILE)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def _require_initialized(self) -> None:
         if not self._initialized:

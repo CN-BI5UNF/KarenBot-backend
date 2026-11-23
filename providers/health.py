@@ -18,6 +18,7 @@ from .base import (
     ProviderRateLimitError,
     ProviderTimeoutError,
 )
+from .safe_http import send_provider_request
 
 HealthStatus = Literal["checking", "ok", "error"]
 
@@ -33,19 +34,20 @@ def _timeout(seconds: float) -> httpx.Timeout:
     return httpx.Timeout(seconds, connect=min(5.0, seconds), read=seconds)
 
 
-def _client_kwargs(timeout_seconds: float) -> dict:
+def _client_kwargs(timeout_seconds: float, *, public_only: bool = False) -> dict:
     """给 httpx 的客户端参数。
 
-    只开 ``trust_env``，**不**显式传 ``proxy=``：显式传参会盖掉 httpx 自己的
-    NO_PROXY 判定，用户写了 ``NO_PROXY=api.example.com`` 也会被硬塞进代理。
-    实测踩过：本机 HTTP(S)_PROXY 指向一个坏代理（TLS 握手 5 秒超时），
-    把中转站加进 NO_PROXY 后健康探针仍然超时——因为这里又把代理塞回去了，
-    首页于是误报「不可用」，而真实模型请求（走 SDK 的 trust_env）是好的。
+    已保存 provider 沿用 ``trust_env`` 和 NO_PROXY；未保存的公网探测禁用环境
+    代理，避免代理把请求转发到内网目标。
     """
-    from utils.proxy_env import sanitize_no_proxy_env
+    if not public_only:
+        from utils.proxy_env import sanitize_no_proxy_env
 
-    sanitize_no_proxy_env()
-    return {"timeout": _timeout(timeout_seconds), "trust_env": True}
+        sanitize_no_proxy_env()
+    return {
+        "timeout": _timeout(timeout_seconds),
+        "trust_env": not public_only,
+    }
 
 
 def _short_error(resp: httpx.Response) -> str:
@@ -63,6 +65,7 @@ async def probe_provider_endpoint(
     model: str,
     timeout_seconds: float = 8.0,
     extra_headers: dict[str, str] | None = None,
+    public_only: bool = False,
 ) -> ProviderHealth:
     """探测 provider + model 是否可用。"""
     if not api_key:
@@ -82,6 +85,7 @@ async def probe_provider_endpoint(
                 model=model,
                 timeout_seconds=timeout_seconds,
                 extra_headers=extra_headers or {},
+                public_only=public_only,
             )
         else:
             result = await _probe_openai_compat(
@@ -90,6 +94,7 @@ async def probe_provider_endpoint(
                 model=model,
                 timeout_seconds=timeout_seconds,
                 extra_headers=extra_headers or {},
+                public_only=public_only,
             )
     except httpx.TimeoutException:
         return ProviderHealth("error", "请求超时")
@@ -109,6 +114,7 @@ async def probe_embedding_endpoint(
     model: str,
     timeout_seconds: float = 8.0,
     extra_headers: dict[str, str] | None = None,
+    public_only: bool = False,
 ) -> ProviderHealth:
     """探测 OpenAI 兼容 /embeddings 端点是否可用。"""
     if not api_key:
@@ -126,6 +132,7 @@ async def probe_embedding_endpoint(
             model=model,
             timeout_seconds=timeout_seconds,
             extra_headers=extra_headers or {},
+            public_only=public_only,
         )
     except httpx.TimeoutException:
         return ProviderHealth("error", "请求超时")
@@ -210,6 +217,7 @@ async def _probe_openai_compat(
     model: str,
     timeout_seconds: float,
     extra_headers: dict[str, str],
+    public_only: bool = False,
 ) -> ProviderHealth:
     url = base_url.rstrip("/") + "/chat/completions"
     headers = {
@@ -224,8 +232,17 @@ async def _probe_openai_compat(
         "max_tokens": 1,
         "stream": False,
     }
-    async with httpx.AsyncClient(**_client_kwargs(timeout_seconds)) as client:
-        resp = await client.post(url, headers=headers, json=payload)
+    async with httpx.AsyncClient(
+        **_client_kwargs(timeout_seconds, public_only=public_only)
+    ) as client:
+        resp = await send_provider_request(
+            client,
+            "POST",
+            url,
+            headers=headers,
+            json_body=payload,
+            public_only=public_only,
+        )
     if resp.status_code in (401, 403):
         return ProviderHealth("error", "鉴权失败，请检查 API 密钥")
     if resp.status_code == 402:
@@ -252,6 +269,7 @@ async def _probe_openai_compat_embedding(
     model: str,
     timeout_seconds: float,
     extra_headers: dict[str, str],
+    public_only: bool = False,
 ) -> ProviderHealth:
     endpoint = "/embeddings"
     payload = {
@@ -270,8 +288,17 @@ async def _probe_openai_compat_embedding(
         "Content-Type": "application/json",
         **extra_headers,
     }
-    async with httpx.AsyncClient(**_client_kwargs(timeout_seconds)) as client:
-        resp = await client.post(url, headers=headers, json=payload)
+    async with httpx.AsyncClient(
+        **_client_kwargs(timeout_seconds, public_only=public_only)
+    ) as client:
+        resp = await send_provider_request(
+            client,
+            "POST",
+            url,
+            headers=headers,
+            json_body=payload,
+            public_only=public_only,
+        )
     if resp.status_code in (401, 403):
         return ProviderHealth("error", "鉴权失败，请检查 API 密钥")
     if resp.status_code == 402:
@@ -314,6 +341,7 @@ async def _probe_anthropic(
     model: str,
     timeout_seconds: float,
     extra_headers: dict[str, str],
+    public_only: bool = False,
 ) -> ProviderHealth:
     url = base_url.rstrip("/") + "/v1/messages"
     headers = {
@@ -327,8 +355,17 @@ async def _probe_anthropic(
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "hi"}],
     }
-    async with httpx.AsyncClient(**_client_kwargs(timeout_seconds)) as client:
-        resp = await client.post(url, headers=headers, json=payload)
+    async with httpx.AsyncClient(
+        **_client_kwargs(timeout_seconds, public_only=public_only)
+    ) as client:
+        resp = await send_provider_request(
+            client,
+            "POST",
+            url,
+            headers=headers,
+            json_body=payload,
+            public_only=public_only,
+        )
     if resp.status_code in (401, 403):
         return ProviderHealth("error", "鉴权失败，请检查 API 密钥")
     if resp.status_code == 402:

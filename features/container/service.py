@@ -21,9 +21,11 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import platform
 import posixpath
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -32,7 +34,7 @@ from app_config.paths import AppPaths
 
 from .admin import run_admin_setup
 from .agent_helper import AGENT_HELPER_SOURCE
-from .docker_cli import CommandResult, DockerCLI
+from .docker_cli import CommandResult, DockerCLI, DockerOutputError
 from .errors import ContainerError
 from .storage import ContainerStorage
 
@@ -213,6 +215,59 @@ print(json.dumps({
     "binary": binary,
     "truncated": truncated,
 }, ensure_ascii=False))
+'''
+
+
+_EXPORT_FILE_SCRIPT = r'''
+import os, stat, sys
+
+path = sys.argv[1]
+limit = max(0, int(sys.argv[2]))
+required = ("O_NOFOLLOW", "O_DIRECTORY")
+if any(not hasattr(os, name) for name in required):
+    raise SystemExit(2)
+
+try:
+    directory_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        parts = [part for part in path.split("/") if part]
+        if not parts:
+            raise SystemExit(2)
+        for component in parts[:-1]:
+            next_fd = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_fd = os.open(
+            parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd
+        )
+    finally:
+        os.close(directory_fd)
+except OSError:
+    raise SystemExit(2)
+
+try:
+    metadata = os.fstat(file_fd)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit(2)
+    if metadata.st_size > limit:
+        raise SystemExit(3)
+    total = 0
+    with os.fdopen(file_fd, "rb") as source:
+        while True:
+            chunk = source.read(min(65536, limit - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise SystemExit(3)
+            sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
+except OSError:
+    raise SystemExit(2)
 '''
 
 
@@ -427,15 +482,24 @@ class ContainerService:
         max_output_bytes: int | None = None,
         raise_on_timeout: bool = True,
         terminate_on_truncate: bool = True,
+        stdout_file: Any = None,
+        stdout_limit: int | None = None,
     ) -> CommandResult:
         try:
-            result = await self.docker.run(
-                args,
-                input_bytes=input_bytes,
-                timeout=timeout if timeout is not None else _CLIENT_TIMEOUT,
-                max_output_bytes=max_output_bytes or self.max_output_bytes,
-                terminate_on_truncate=terminate_on_truncate,
-            )
+            run_kwargs: dict[str, Any] = {
+                "input_bytes": input_bytes,
+                "timeout": timeout if timeout is not None else _CLIENT_TIMEOUT,
+                "max_output_bytes": max_output_bytes or self.max_output_bytes,
+                "terminate_on_truncate": terminate_on_truncate,
+            }
+            if stdout_file is not None:
+                run_kwargs["stdout_file"] = stdout_file
+                run_kwargs["stdout_limit"] = stdout_limit
+            result = await self.docker.run(args, **run_kwargs)
+        except DockerOutputError as exc:
+            raise ContainerError(
+                "无法写入容器导出临时文件", code="container_path_invalid"
+            ) from exc
         except FileNotFoundError:
             raise ContainerError(
                 "未找到 Docker CLI；请安装 Docker Desktop / Docker Engine",
@@ -1705,14 +1769,7 @@ class ContainerService:
         source = _validate_container_path(container_path)
         target = _resolve_host_workspace_path(workspace_dir, host_path)
         await self.ensure_running()
-        exists = await self._run(
-            ["exec", self.name, "test", "-f", source],
-            timeout=15.0,
-        )
-        if exists.returncode != 0:
-            raise ContainerError(
-                "容器内文件不存在或不是普通文件", code="container_path_invalid"
-            )
+        max_bytes = max(1, int(getattr(self.config, "file_size_mb", 64))) * _MIB
         if target.exists() and not overwrite:
             raise ContainerError("宿主目标已存在", code="container_target_exists")
         try:
@@ -1721,13 +1778,67 @@ class ContainerService:
             raise ContainerError(
                 "无法创建宿主目标目录", code="container_path_invalid"
             ) from None
-        result = await self._run(
-            ["cp", f"{self.name}:{source}", str(target)],
-            timeout=60.0,
-            max_output_bytes=32 * 1024,
-        )
-        if result.returncode != 0:
-            raise _map_failure(result, default="container_export_failed")
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+            )
+        except OSError as exc:
+            raise ContainerError(
+                "无法创建宿主临时文件", code="container_path_invalid"
+            ) from exc
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                result = await self._run(
+                    [
+                        "exec",
+                        self.name,
+                        "python3",
+                        "-I",
+                        "-c",
+                        _EXPORT_FILE_SCRIPT,
+                        source,
+                        str(max_bytes),
+                    ],
+                    timeout=60.0,
+                    max_output_bytes=32 * 1024,
+                    stdout_file=output,
+                    stdout_limit=max_bytes,
+                )
+                output.flush()
+                os.fsync(output.fileno())
+            if result.returncode == 3 or result.stdout_truncated:
+                raise ContainerError(
+                    "容器内文件超过导出大小上限", code="container_file_too_large"
+                )
+            if result.returncode == 2:
+                raise ContainerError(
+                    "容器内文件不存在、不是普通文件或包含符号链接",
+                    code="container_path_invalid",
+                )
+            if result.returncode != 0:
+                raise _map_failure(result, default="container_export_failed")
+            if overwrite:
+                try:
+                    os.replace(temporary_path, target)
+                except OSError as exc:
+                    raise ContainerError(
+                        "无法写入宿主目标文件", code="container_path_invalid"
+                    ) from exc
+            else:
+                try:
+                    os.link(temporary_path, target)
+                except FileExistsError as exc:
+                    raise ContainerError(
+                        "宿主目标已存在", code="container_target_exists"
+                    ) from exc
+                except OSError as exc:
+                    raise ContainerError(
+                        "无法写入宿主目标文件", code="container_path_invalid"
+                    ) from exc
+                temporary_path.unlink()
+        finally:
+            temporary_path.unlink(missing_ok=True)
         self._touch()
         return {"ok": True, "source": source, "target": target.name}
 

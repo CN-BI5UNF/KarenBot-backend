@@ -256,28 +256,27 @@ def main():
         elif new_path == "/dev/null":
             target = old_path
             created = False
-            source = read_lines(os.path.join(root, target))
-            final = apply_hunks(source, hunks)
-            if final:
-                fail("删除文件的补丁未能删除全部内容：%s" % target)
         else:
             if old_path != new_path:
                 fail("不支持重命名补丁：%s -> %s" % (old_path, new_path))
             target = new_path
             created = False
-            source = read_lines(os.path.join(root, target))
-            final = apply_hunks(source, hunks)
         relative = target.replace("/", os.sep)
         full = os.path.join(root, relative)
+        if os.path.islink(full):
+            fail("补丁路径是符号链接：%s" % target, "agent_path_forbidden")
         real = os.path.realpath(full)
         if real != root and not real.startswith(root + os.sep):
             fail("补丁路径越出工作区：%s" % target, "agent_path_forbidden")
-        if os.path.islink(full):
-            fail("补丁路径是符号链接：%s" % target, "agent_path_forbidden")
         if created and os.path.exists(full):
             fail("新建文件已存在：%s" % target)
         if not created and not os.path.isfile(full):
             fail("文件不存在：%s" % target, "agent_file_missing")
+        if not created:
+            source = read_lines(full)
+            final = apply_hunks(source, hunks)
+            if new_path == "/dev/null" and final:
+                fail("删除文件的补丁未能删除全部内容：%s" % target)
         for kind, _ in (row for _, rows in hunks for row in rows):
             if kind == "+":
                 additions += 1

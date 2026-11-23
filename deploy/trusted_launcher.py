@@ -652,6 +652,8 @@ def check(
     data_dir = Path(data_dir).resolve()
     path = manifest_path or (project_root / "compatibility.json")
     try:
+        if path.is_symlink():
+            raise ValueError("拒绝使用符号链接 manifest")
         path = path.resolve()
         path.relative_to(project_root)
     except (OSError, ValueError):
