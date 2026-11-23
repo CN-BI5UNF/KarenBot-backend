@@ -406,6 +406,12 @@ class ProactiveLoop:
         先用小模型 ProactiveRouterAgent.should_act 判定，True 才跑主 ChatAgent。
         这是主动思考省 token 的关键路径：大部分时段都应该被路由器拦下。
         """
+        if getattr(self.pipeline, "adapter", None) is None:
+            # 无渠道模式：没有可发送的目标，跳过本轮，避免白跑模型。
+            # 之后重新启用渠道时，这个循环会自动恢复。
+            logger.debug("主动思考：当前没有可用渠道，跳过")
+            return
+
         interval = self.behavior_cfg.proactive_think_interval_seconds
         idle = self.pipeline.idle_seconds()
         if idle < interval:

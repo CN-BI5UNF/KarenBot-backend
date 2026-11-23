@@ -198,7 +198,7 @@ class MessagePipeline(
     def __init__(
         self,
         *,
-        adapter: IAdapter,
+        adapter: IAdapter | None,
         chat_agent: ChatAgent,
         persona: Persona,
         history: HistoryManager,

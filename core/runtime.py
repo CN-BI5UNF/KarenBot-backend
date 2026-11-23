@@ -480,41 +480,7 @@ class Runtime:
 
         # ----- 7. Adapter -----
         stage_t0 = time.monotonic()
-        from adapters.registry import AdapterRegistry, build_adapter
-
-        if not self.config.adapters:
-            raise RuntimeError("配置中没有任何 adapter")
-
-        enabled_adapters = [
-            (name, cfg)
-            for name, cfg in self.config.adapters.items()
-            if getattr(cfg, "enabled", True)
-        ]
-        if not enabled_adapters:
-            raise RuntimeError("配置中的所有 adapter 都处于 disabled 状态")
-        if len(enabled_adapters) > 1:
-            logger.warning(
-                "检测到 %s 个启用的适配器（%s）；当前版本仍按单主适配器运行，"
-                "只启动第一个。多适配器并存将在后续版本开放。",
-                len(enabled_adapters),
-                ", ".join(name for name, _ in enabled_adapters),
-            )
-        adapter_name, adapter_cfg = enabled_adapters[0]
-        self.adapter_registry = AdapterRegistry()
-        self.adapter = build_adapter(
-            adapter_name,
-            str(getattr(adapter_cfg, "type", "onebot11")),
-            cfg=adapter_cfg,
-            secrets=self.secrets,
-        )
-        self.adapter_registry.register(self.adapter)
-        logger.info(
-            "Adapter 已实例化: name=%s type=%s dialect=%s capabilities=%s",
-            adapter_name,
-            getattr(adapter_cfg, "type", "onebot11"),
-            getattr(getattr(self.adapter, "dialect", None), "name", "-"),
-            type(getattr(self.adapter, "capabilities", None)).__name__,
-        )
+        adapter_name, adapter_cfg = self._setup_adapter()
         logger.debug("Runtime 阶段完成：Adapter 构造 %.2fs", time.monotonic() - stage_t0)
 
         # ----- 8. Tools -----
@@ -549,7 +515,7 @@ class Runtime:
                 max_messages=self.config.behavior.rate_limit.max_messages,
                 whitelist_provider=self._friend_whitelist_provider,
             )
-        if self.rate_limiter is not None:
+        if self.rate_limiter is not None and self.adapter is not None:
             self.adapter.set_friend_confirmed_callback(
                 self.rate_limiter.remember_friend
             )
@@ -635,7 +601,9 @@ class Runtime:
             "pending_requests": self.pending_requests,
             "behavior_cfg": self.config.behavior,
             "features_cfg": self.config.features,
-            "whitelist": adapter_cfg.whitelist,
+            # 无渠道模式下 adapter_cfg 为 None；pipeline 会把 None 解释为
+            # 默认 verify 策略/空黑名单。
+            "whitelist": getattr(adapter_cfg, "whitelist", None),
             "blacklist": getattr(adapter_cfg, "blacklist", None),
             "emoji_dir": self.paths.EMOJI_DIR,
             "workspace_dir": self.paths.WORKSPACE_DIR,
@@ -727,9 +695,10 @@ class Runtime:
 
         # ----- 15. 启动 adapter + proactive loop -----
         stage_t0 = time.monotonic()
-        # 当前只运行单主适配器：保持旧行为——启动失败直接让 Runtime 启动失败。
-        # AdapterRegistry 仍负责生命周期收口，为后续多适配器预留。
-        await self.adapter.start()
+        # 当前只运行单主适配器：启用时启动失败仍让 Runtime 启动失败；
+        # 零渠道模式下 adapter 为 None，直接跳过。
+        if self.adapter is not None:
+            await self.adapter.start()
         await self.proactive_loop.start()
         logger.debug("Runtime 阶段完成：Adapter/主动循环启动 %.2fs", time.monotonic() - stage_t0)
 
@@ -2247,6 +2216,59 @@ class Runtime:
         ):
             return dict(kwargs)
         return {name: value for name, value in kwargs.items() if name in parameters}
+
+    def _setup_adapter(self) -> tuple[str, Any | None]:
+        """选择并构造主适配器。
+
+        返回 ``("none", None)`` 表示当前没有启用的渠道。此时 Runtime 仍然
+        启动，GUI/WebUI 可以使用模型、人格和本地功能，只是不会收发消息；
+        之后在设置里重新启用渠道会走热重载路径。
+        """
+        from adapters.registry import AdapterRegistry, build_adapter
+
+        self.adapter_registry = AdapterRegistry()
+        enabled_adapters = [
+            (name, cfg)
+            for name, cfg in (self.config.adapters or {}).items()
+            if getattr(cfg, "enabled", True)
+        ]
+        if not enabled_adapters:
+            if self.config.adapters:
+                logger.warning(
+                    "所有渠道均已停用；以无渠道模式启动。"
+                    "GUI/WebUI 仍可使用模型和本地功能，但不会收发 QQ/Telegram 消息。"
+                )
+            else:
+                logger.warning(
+                    "配置中没有任何渠道；以无渠道模式启动。"
+                    "GUI/WebUI 仍可使用模型和本地功能。"
+                )
+            self.adapter = None
+            return "none", None
+
+        if len(enabled_adapters) > 1:
+            logger.warning(
+                "检测到 %s 个启用的适配器（%s）；当前版本仍按单主适配器运行，"
+                "只启动第一个。多适配器并存将在后续版本开放。",
+                len(enabled_adapters),
+                ", ".join(name for name, _ in enabled_adapters),
+            )
+        adapter_name, adapter_cfg = enabled_adapters[0]
+        self.adapter = build_adapter(
+            adapter_name,
+            str(getattr(adapter_cfg, "type", "onebot11")),
+            cfg=adapter_cfg,
+            secrets=self.secrets,
+        )
+        self.adapter_registry.register(self.adapter)
+        logger.info(
+            "Adapter 已实例化: name=%s type=%s dialect=%s capabilities=%s",
+            adapter_name,
+            getattr(adapter_cfg, "type", "onebot11"),
+            getattr(getattr(self.adapter, "dialect", None), "name", "-"),
+            type(getattr(self.adapter, "capabilities", None)).__name__,
+        )
+        return adapter_name, adapter_cfg
 
     async def _friend_whitelist_provider(self) -> set[str]:
         """RateLimiter 用：返回当前好友 user_id 集合。"""
