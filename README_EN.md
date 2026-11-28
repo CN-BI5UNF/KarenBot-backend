@@ -1,176 +1,130 @@
-<div align="center">
+# KarenBot-backend
 
-# KarenBot
+[简体中文](README.md) · [KarenBot unified repository](https://github.com/CN-BI5UNF/KarenBot) · [Changelog](CHANGELOG.md)
 
-**A chatbot framework that makes virtual characters feel alive**
+KarenBot-backend is the **core runtime and control-plane module** for KarenBot. It contains the
+launcher, configuration and migration code, Runtime, adapters, memory, tools, model plugins, and
+the FastAPI/WebSocket control API. It does not contain a desktop or browser console.
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![WebUI](https://img.shields.io/badge/UI-WebUI%20%28FastAPI%29-blueviolet.svg)](#)
-[![CI](https://github.com/CN-BI5UNF/KarenBot/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/CN-BI5UNF/KarenBot/actions/workflows/test.yml)
+The current unified release is [v2.1.3-alpha](https://github.com/CN-BI5UNF/KarenBot/releases/tag/v2.1.3-alpha).
+It is the GitHub **Latest normal release**, not a pre-release; the alpha suffix is retained for tag
+compatibility. The official installer is maintained in
+[KarenBot-Installer](https://github.com/CN-BI5UNF/KarenBot-Installer).
 
-[Quick start](#quick-start) · [karen commands](#karen-commands) · [Upgrading from Debata](#upgrading-from-debata) · [Docs](#docs)
+## Repository boundary
 
-</div>
+| Repository | Scope |
+|---|---|
+| **KarenBot-backend** | Core runtime, data paths, adapters, and control API |
+| [KarenBot-GUI](https://github.com/CN-BI5UNF/KarenBot-GUI) | Native GTK4/libadwaita `gui/` frontend |
+| [KarenBot-WebUI](https://github.com/CN-BI5UNF/KarenBot-WebUI) | Browser `webui/` frontend |
+| [KarenBot](https://github.com/CN-BI5UNF/KarenBot) | Unified release, component lock, and distribution assets |
 
----
+The two frontends use the same authenticated control API. A development checkout must copy one
+frontend module into the backend root; a unified installer does this from the release manifest.
 
-> "A virtual character is not just a program that replies to messages. It is a person with a personality, an inner world, and a life of its own."
+## Layout
 
-KarenBot is a general-purpose chat-agent framework. Give it a persona and it becomes that person.
+```text
+main.py                 launcher (`--frontend gui|webui`)
+main_cli.py             headless launcher and setup flow
+core/                   Runtime, events, media, chat timeline, backup/restore
+app_config/             schemas, migrations, paths, and secrets
+adapters/               OneBot 11/NapCat, Telegram, and transports
+agents/ memory/ mind/   persona agents, history, RAG, and background state
+providers/ tools/       model providers, tool registry, and built-ins
+backend/                FastAPI control plane, auth, API routes, plugin protocol
+docs/                   architecture, deployment, protocol, and data contracts
+```
 
-The project is named **KarenBot** after **Karen**, Plankton's robot girlfriend in SpongeBob SquarePants. The name is community-inspired; this project is not affiliated with Nickelodeon, Paramount, or their official works.
-
-- Repository: <https://github.com/CN-BI5UNF/KarenBot>
-- Default branch: `main`
-- In-app update branch: `refactor/main`
-- Status: `1.0.11-alpha` refactor snapshot; interfaces may still change
-
-> **Upstream and license**: KarenBot is derived from [binglang001/Debata_Agent](https://github.com/binglang001/Debata_Agent) and its contributors. Original copyright notices are retained. KarenBot is released under **Apache-2.0**. See [NOTICE](NOTICE).
-
-## Features
-
-- Persona prompts, dynamic state, relationships, and per-persona memory. The persona backend can wake a sleeping/collapsed persona with a WebUI-only "wake-up" line.
-- QQ / NapCat integration (private and group chats, send queue).
-- Long-term memory and archival without rewriting raw history.
-- Multi-turn tool loop: messaging, recall, memory, search, weather, wake-ups, sub-agents.
-- Persona character images: upload a gallery of appearances on the Personas page, choose a preview image, inspect them through a read-only virtual knowledge entry, and send them directly as images. The model has no write/delete path for the gallery.
-- One merged black/white list page controls inbound policy, whitelist IDs, and blacklist IDs; saving applies both immediately and blacklist still wins.
-- WebUI built with FastAPI and dependency-free static assets; model configuration lives in Model Management, and the sidebar collapses to icons.
-- Multi-provider support: OpenAI, Anthropic, DeepSeek, GLM, Qwen, Gemini, OpenRouter, custom compatible endpoints; relays can declare a Gemini/Claude/OpenAI vendor for capability lookup.
-- Native vision paths for images, complete animated GIFs, and complete videos where the selected main model supports them; standalone vision remains available. Videos are sent as managed data URLs without frame extraction; unsupported models receive a workspace placeholder only.
-- On-demand knowledge and group-slang lookup; knowledge supports per-entry sharing, while slang is shared by every persona in the same group. The slang page supports search; AI applications whose term duplicates an existing group entry are auto-rejected and kept visible instead of overwriting it.
-- **Chat selection**: the model can temporarily pause ordinary group messages or accept only selected groups. @-mentions still arrive, and private chats are never filtered.
-- **Per-group @ triggers**: choose groups that only respond after an @ mention and set a message-count and/or duration window plus a per-group memory cap for filtered messages. The model can call `group_trigger_window` to open, extend, or close transient windows and use `history_limit` to include the latest filtered messages, with at most two LLM-opened groups at once.
-- **Two-layer tool routing (experimental)**: `behavior.tool_schema_profile="routed"` exposes core tools plus `list_toolsets` / `load_toolset`; loaded toolsets use compact schemas and `tool_search` remains the per-tool detail layer. State is per conversation, and the default profile stays `compact`.
-- **Storage & data**: one page for storage inventory/cache cleanup, context budget, previewed persona runtime cleanup, and local source uninstall, with optional external backup and an independent uninstall helper.
-- LLM-managed emoji folder tools plus native QQ face adaptation: inbound faces show Chinese names (e.g. `[流眼泪]` for `[表情5]`) and send tools accept face names.
-- Controlled Docker container: command execution, `/workspace` file tools, import/export, and a built-in read-only container file manager (root by default, with a `/workspace` shortcut) with directory navigation and bounded text previews; no network/privileges/non-root by default, with memory, CPU, pids, and storage limits. B named-volume soft quota is the default and needs no administrator; C fixed-size storage is an advanced hard limit. It supports Docker registry-mirror prefixes, one-click prepare/start, and background image pulls. First C-mode enable opens a Linux sudo-password dialog (stdin only, never stored) or a Windows UAC prompt. Windows includes a VHDX setup script (see [container docs](docs/container.md)).
-- Bounded summaries, CAS commits, media lifecycle, scoped deletion/recovery, transactional config writes.
-- In-app updates from GitHub Releases/tags; source-only updates do not overwrite data.
-
-## Requirements
-
-- Python 3.10+ (CI covers 3.11 and 3.12)
-- [uv](https://docs.astral.sh/uv/)
-- [NapCat](https://napneko.github.io/guide/start-install) for QQ integration (optional)
-- An LLM API key (DeepSeek is a good default for Chinese and cost)
-- Linux, Windows, or macOS; headless servers are supported
+User data is outside the source package: `data/`, `personas/`, `config.yaml`, encrypted secrets,
+RSA private keys, logs, model weights, and virtual environments must never be committed.
 
 ## Quick start
 
-```bash
-git clone https://github.com/CN-BI5UNF/KarenBot.git
-cd KarenBot
-uv sync
-uv run python main.py
-```
-
-The WebUI listens on `127.0.0.1:8000` by default. To expose it to the LAN, enable "Allow LAN access" under Settings → Network and restart the WebUI, set `webui.allow_lan: true` in `config.yaml`, or pass `--host 0.0.0.0` explicitly (the CLI flag overrides the config). The terminal prints the WebUI token; the first launch opens the setup wizard.
-
-Normal launches check the base dependencies declared in `pyproject.toml` before importing the app. Missing or out-of-range packages are installed editable with the running interpreter (`uv pip install --python <interpreter> -e .`, falling back to pip). Optional extras and local-model dependencies are never installed implicitly. Set `KAREN_DISABLE_DEPENDENCY_CHECK=1` to skip the check or `KAREN_DISABLE_DEPENDENCY_INSTALL=1` to check without installing.
-
-For servers or SSH sessions:
+Copy either frontend into the checkout, then install the backend package:
 
 ```bash
-uv run python main.py --no-gui --setup
+cp -a /path/to/KarenBot-WebUI/webui ./webui   # or KarenBot-GUI/gui
+python3 -m venv .venv
+.venv/bin/python -m pip install -U pip
+.venv/bin/python -m pip install -e .
+.venv/bin/python main.py --list-frontends
+.venv/bin/python main.py --frontend webui
 ```
 
-Linux background service:
+The WebUI listens on `127.0.0.1` by default. Enable LAN access in Settings → Network, set
+`webui.allow_lan: true`, or pass `--host 0.0.0.0` explicitly. The first launch opens the setup
+wizard. You can leave the channel disabled to test models and local features first.
+Re-submitting the wizard preserves settings it does not display, including network, backup,
+storage, external programs, hidden provider/agent fields, and secret references. A running Runtime
+must be stopped before applying the wizard again.
+
+For the native GUI on Linux, install system GTK4/libadwaita/PyGObject and make the virtual
+environment see system packages:
 
 ```bash
-bash scripts/install_systemd_user.sh
-./karen start
-./karen status
-./karen log
-./karen stop
+sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
+python3 -m venv --system-site-packages .venv
+.venv/bin/python -m pip install -e .
+.venv/bin/python main.py --frontend gui
 ```
 
-The legacy `./debata` command is kept as a compatibility wrapper during the transition.
+## Selective backup and restore
 
-Windows:
+The GUI and WebUI share the backend backup API under Settings → Backup. Users can select these
+categories independently:
 
-```powershell
-git clone https://github.com/CN-BI5UNF/KarenBot.git
-cd KarenBot
-uv sync
-uv run python main.py --host 127.0.0.1 --port 8000
-```
+- configuration and preferences;
+- encrypted credentials and RSA key material;
+- chats/memory and vector memory;
+- workspace files, with incoming media and attachments as a subordinate option;
+- emoji assets, custom provider presets, and personas.
 
-The Windows data directory defaults to `%LOCALAPPDATA%\KarenBot`. Docker Desktop containers are supported; the C-mode VHDX script still needs real-Windows validation, and Windows service integration is planned for a later phase. Complete GIF/video input is enabled only for main models verified in the capability table (currently Qwen3.6-Plus, Qwen3-VL, and OpenRouter Gemini).
+Before creating an archive, each category reports its source size. During the job, the UI reports
+per-category processed bytes and archive bytes. These sizes describe uncompressed data; the final
+ZIP size depends on compression.
 
-## karen commands
+Existing archives are deeply verified before restore. The user selects categories, previews archive
+and current-target sizes plus overwrite/new-file counts, and enters the confirmation phrase
+`恢复备份`. The restore runs asynchronously. It pauses the Runtime, creates a complete rollback
+archive for the selected categories, then overlays verified archived paths: matching files are
+replaced, missing files are added, and current files absent from the archive remain untouched.
+Unselected categories are not written. The job reports progress, warnings, and the rollback
+archive; write failures and a failed post-restore restart trigger a rollback attempt.
 
-| Command | Description |
-|---|---|
-| `karen start` | Start; installs the systemd user service on first run |
-| `karen stop` | Stop the service |
-| `karen restart` | Restart the service |
-| `karen status` | Show status |
-| `karen log` | Follow logs |
-| `karen enable` | Enable boot autostart and start now |
-| `karen disable` | Disable boot autostart |
-| `karen install` | Install the service without starting |
-| `karen uninstall` | Uninstall the service |
-| `karen help` | Show help |
+Credential restore is allowed only when the archive contains a verified RSA key pair, and the
+private key is imported into the current secret store. Archives are not encrypted, so protect them
+like passwords. User exports snapshot SQLite stores independently and do not promise a global
+cross-database transaction; strict migration snapshots remain a separate maintenance-only feature.
+See [backup and restore details](docs/backup.md) for limits, offline verification, isolation drills,
+and the full API.
 
-Compatibility: the old `debata` command, `DEBATA_*` environment variables, `debata-agent` service name, and legacy data directory remain recognized for at least one release. Old data is never deleted automatically.
+## Version and testing
 
-## Upgrading from Debata
-
-1. Back up the old data directory (`~/.local/share/Debata_Agent` or `%LOCALAPPDATA%\Debata_Agent`).
-2. Update the source and start `karen` or `python main.py`.
-3. KarenBot prefers its new data directory. If it does not exist and the legacy directory does, KarenBot keeps using the legacy directory and prints a migration notice.
-4. Legacy `debata`, `DEBATA_DATA_ROOT`, `DEBATA_WEBUI_TOKEN`, and `DEBATA_DISABLE_TREND_RESEARCH` are still recognized.
-5. An old `persona.active: debata` is migrated to `deepseek` (or the default persona if deepseek is unavailable) and written back with a config backup.
-
-Migration is copy-first: the old directory is preserved, and failures fall back to it.
-
-## Data directory
-
-- Linux: `~/.local/share/KarenBot/instances/default/`
-- Windows: `%LOCALAPPDATA%\KarenBot\instances\default/`
-- Legacy: `~/.local/share/Debata_Agent/instances/default/`
-
-`KAREN_DATA_ROOT` overrides the data root; the legacy `DEBATA_DATA_ROOT` is still accepted. Never commit `config.yaml`, `secrets.enc`, RSA private keys, or WebUI/NapCat tokens.
-
-## Testing
+`VERSION`, `backend.__version__`, and `pyproject.toml` use `2.1.3-alpha`; `uv.lock` stores the
+PEP 440 normalized form `2.1.3a0`.
 
 ```bash
-KAREN_DISABLE_TREND_RESEARCH=1 .venv/bin/python -m pytest -q --ignore=tests/test_kv_cache_real.py
-.venv/bin/python -m ruff check .
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pytest -q tests -k 'not api_builds_module_service'
+.venv/bin/python -m ruff check agents core memory mind providers tools tests
 git diff --check
 ```
 
-CI runs Ubuntu/Windows × Python 3.11/3.12.
+CI covers Python 3.11 and 3.12.
 
 ## Documentation
 
-- [Features](docs/features.md)
-- [Architecture](docs/architecture.md)
-- [Background running](docs/background_running.md)
-- [Destructive data operations](docs/destructive_admin.md)
-- [Persona writing guide](docs/persona_writing_guide.md)
+- [Architecture](docs/architecture.md) · [Features](docs/features.md) · [Background running](docs/background_running.md)
+- [Protocol catalog](docs/protocols/README.md) · [Frontend integration](docs/protocols/frontend-integration.md)
+- [Data-root contract](docs/data_root_contract.md) · [Storage maintenance](docs/storage_maintenance.md)
+- [Destructive administration](docs/destructive_admin.md) · [Persona guide](docs/persona_writing_guide.md)
 - [Provider development](docs/provider_development.md)
 
-## Security and privacy
+## Security and license
 
-- Web content, knowledge/slang entries, and emoji URLs are untrusted external content.
-- Remote media downloads enforce public-IP resolution, redirect and size limits, and reject credential URLs.
-- Updates only use trusted sources and roll back source changes on failure.
-- Never expose configuration, secrets, RSA keys, or tokens.
-- Docker containers are resource/file isolation, not an absolute security boundary; keep networking, capabilities, and host mounts disabled by default.
-
-## Known limitations
-
-- Development snapshot: interfaces may change; production migration, restore drills, and launcher installation are not performed automatically.
-- Toolset routing is experimental and off by default; dynamic toolset loading can change the tools block and may reduce KV-cache hits. Complete GIF/video input is limited to verified main models (currently Qwen3.6-Plus, Qwen3-VL, and OpenRouter Gemini). Docker C-mode storage requires a one-time administrator setup (Linux sudo-password dialog / Windows UAC), and the Windows VHDX script is pending real-machine validation.
-- The legacy data directory is used by default until an explicit migration.
-- Without a connected NapCat, QQ messages will not flow.
-
-## License and attribution
-
-- Apache-2.0; see [LICENSE](LICENSE).
-- Upstream: [binglang001/Debata_Agent](https://github.com/binglang001/Debata_Agent) and its contributors. Original copyright remains with the upstream authors.
-- Rename/refactor notice: [NOTICE](NOTICE).
-- The name "Karen" refers to a SpongeBob character; all character rights belong to their respective owners. This project claims no official affiliation.
+The control API requires authentication. Do not expose it to an untrusted network. Never commit
+configuration, tokens, API keys, RSA private keys, chat history, or logs. Updates only write the
+program-file allowlist and create per-file backups before replacement. The project is licensed
+under Apache-2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE).

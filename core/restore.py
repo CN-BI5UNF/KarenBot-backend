@@ -176,6 +176,7 @@ def verify_backup(
         "credential_restorable": False,
         "credential_verification": "not_checked",
         "capabilities": {},
+        "components": [],
         "ledger": None,
         "migration_ready": False,
         "errors": errors,
@@ -290,6 +291,32 @@ def verify_backup(
                 _error(errors, "duplicate_manifest", f"manifest 重复成员：{name}")
                 continue
             entries[name] = item
+        from core.backup import BACKUP_COMPONENTS, _backup_component_for_path, _format_bytes
+
+        labels = dict(BACKUP_COMPONENTS)
+        labels["maintenance"] = "维护状态（迁移快照）"
+        component_totals: dict[str, dict[str, Any]] = {}
+        for name, entry in entries.items():
+            component_id = _backup_component_for_path(name)
+            declared_component = entry.get("component")
+            if declared_component is not None and declared_component != component_id:
+                _error(errors, "manifest_component_mismatch", f"成员组件声明与路径不匹配：{name}")
+            item = component_totals.setdefault(component_id, {
+                "id": component_id,
+                "label": labels.get(component_id, component_id),
+                "archive_bytes": 0,
+                "files": 0,
+            })
+            item["archive_bytes"] += max(0, int(entry.get("size") or 0))
+            item["files"] += 1
+        result["components"] = [
+            item | {
+                "formatted_archive_bytes": _format_bytes(item["archive_bytes"]),
+                "available": item["files"] > 0,
+                "restorable": True,
+            }
+            for item in component_totals.values()
+        ]
         expected = {MANIFEST_NAME, README_NAME} | set(entries)
         actual = set(names)
         if expected != actual:
@@ -457,6 +484,7 @@ def verify_backup(
                 result["ledger"] = ledger_aggregate
 
         result["sqlite_checked"] = sqlite_checked
+        result["ledger_detected"] = any(item.get("aware") for item in ledger_probes)
         result["chat_restorable"] = any(
             name.startswith("data/memory/")
             and entry.get("kind") == "sqlite"
@@ -499,6 +527,14 @@ def verify_backup(
             and result["capabilities"].get("ledger_complete")
             and result["capabilities"].get("cross_plane_consistent")
         )
+        for component in result["components"]:
+            component_id = component["id"]
+            component["restorable"] = bool(
+                result["ok"]
+                and backup_type == "user_export"
+                and component.get("available")
+                and (component_id != "credentials" or result["credential_restorable"])
+            )
         if result["partial"]:
             _warn(warnings, "该包在生成时标记为 partial，不代表完整备份")
         if not result["chat_restorable"]:

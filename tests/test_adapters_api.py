@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 from fastapi import FastAPI
 
+import backend.api.adapters as adapters_api
 from app_config.schema import NapCatAdapterConfig, RootConfig, TelegramAdapterConfig
 from backend.api.adapters import router
 
@@ -23,7 +25,7 @@ def _root_config() -> RootConfig:
     )
 
 
-def _app():
+def _app(project_root: Path | None = None):
     app = FastAPI()
     app.include_router(router)
     saved: list[int] = []
@@ -39,9 +41,51 @@ def _app():
         rt=rt,
         state="running",
         save_config=lambda: saved.append(1),
+        project_root=project_root,
     )
     app.state.host = host
     return app, rt, saved
+
+
+async def test_get_protocol_docs_reads_only_catalogued_document(tmp_path: Path) -> None:
+    document = tmp_path / "docs" / "protocols" / "onebot11.md"
+    document.parent.mkdir(parents=True)
+    document.write_text("# OneBot 11\n\n介绍内容。\n", encoding="utf-8")
+    app, _rt, _saved = _app(tmp_path)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/adapters/docs/napcat")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ok"] is True
+        assert body["path"] == "docs/protocols/onebot11.md"
+        assert body["markdown"] == "# OneBot 11\n\n介绍内容。\n"
+
+
+async def test_get_protocol_docs_rejects_unknown_or_missing_document(tmp_path: Path) -> None:
+    app, _rt, _saved = _app(tmp_path)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        unknown = await client.get("/api/adapters/docs/unknown")
+        assert unknown.status_code == 404
+        missing = await client.get("/api/adapters/docs/telegram")
+        assert missing.status_code == 404
+
+
+async def test_get_protocol_docs_rejects_catalog_path_escape(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "secret.md").write_text("private", encoding="utf-8")
+    monkeypatch.setattr(
+        adapters_api,
+        "protocol_catalog",
+        lambda: [{"id": "unsafe", "name": "Unsafe", "docs": "../secret.md"}],
+    )
+    app, _rt, _saved = _app(tmp_path)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/adapters/docs/unsafe")
+    assert response.status_code == 404
 
 
 async def test_get_and_put_adapter_config() -> None:

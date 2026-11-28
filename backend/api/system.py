@@ -13,7 +13,7 @@ from fastapi import APIRouter, Body, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from backend.auth import COOKIE_NAME, SESSION_TTL_SECONDS
-from backend.runtime_host import STATE_SETUP_REQUIRED
+from backend.runtime_host import STATE_RUNNING, STATE_SETUP_REQUIRED, STATE_STARTING
 from core.backend_restart import request_backend_restart, systemd_managed
 
 from .deps import get_auth, get_host
@@ -453,13 +453,22 @@ async def setup_apply(
     """写入首次配置并启动 Runtime。"""
     host = get_host(request)
     hub = request.app.state.hub
-    try:
-        result = await asyncio.to_thread(host.write_initial_config, payload)
-    except Exception as e:  # noqa: BLE001
-        logger.exception("写入首次配置失败")
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-    ok = await host.start()
+    # 与 start/stop 共用生命周期锁；两次向导提交也必须串行，避免写盘时
+    # 另一个请求把旧配置启动起来，或者第二次提交覆盖刚启动的配置。
+    async with host._restart_lock:
+        async with host._lock:
+            _ensure_no_admin_operation(host)
+            if host.rt is not None or host.state in {STATE_RUNNING, STATE_STARTING}:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Runtime 正在运行或启动，请先停止 Runtime，再提交配置向导。现有配置未修改。",
+                )
+            try:
+                result = await asyncio.to_thread(host.write_initial_config, payload)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("写入首次配置失败")
+                raise HTTPException(status_code=400, detail=str(e)) from e
+        ok = await host.start()
     hub.attach_timeline()
     result["started"] = ok
     if not ok:

@@ -43,6 +43,8 @@ GET /api/adapters/protocols
   [JSON Forms](https://jsonforms.io/) / 自研渲染器生成表单。
 - `status: beta`（当前 Telegram）可以允许保存，但应在卡片上标注「Beta」。
 - `status: planned` 的协议只展示说明与「即将支持」，不要允许保存配置。
+- 协议介绍使用 `GET /api/adapters/docs/{protocol_id}` 读取；`protocols[].docs`
+  是仓库内路径标识，前端不要把它拼接成任意文件 URL。
 
 ## 2. 适配器完整配置（动态表单用）
 

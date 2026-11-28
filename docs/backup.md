@@ -1,22 +1,21 @@
-# 用户数据一键备份
+# 用户数据备份与恢复
 
-设置 →「备份」提供一键备份按钮。备份在后台任务中执行，WebUI 显示扫描、写入、
-校验阶段和进度；完成后可下载 zip。
+GUI 和 WebUI 的「设置 → 备份」支持按类别备份与恢复。创建前可查看每类源数据的估算大小；
+备份在后台执行，页面显示扫描、写入、校验阶段和各类别处理量，完成后可下载 ZIP。
+类别大小按未压缩内容统计，ZIP 最终大小取决于压缩率。
 
 ## 备份范围
 
-默认包含：
-
-- `config.yaml`
-- `secrets.enc`、`secrets.meta`、RSA 公钥，以及 RSA 私钥
-  （优先从系统 keyring 导出；否则读取数据目录的 `rsa_private.pem`）
-- `memory/`：聊天历史数据库
-- `vector/`：RAG 向量数据库
-- `workspace/`：用户文件与整个 `workspace/incoming` 入站目录
-  （图片、视频、音频和普通入站文件；可用 `backup.include_media` 整体关闭）
-- `emoji/`、`providers/presets/`
-- 仓库根 `personas/`：人格定义
-- `token_calibration.json`、`persona_brief.json`（存在时）
+| 类别 ID | 内容 |
+|---|---|
+| `config` | `config.yaml`，以及存在时的校准、人格简述、知识和黑话文件 |
+| `credentials` | `secrets.enc`、`secrets.meta`、RSA 公私钥；优先从系统 keyring 导出私钥 |
+| `chats` | `memory/` 中的聊天和记忆 |
+| `rag` | `vector/` 中的向量记忆 |
+| `workspace` | `workspace/` 中的文件；可以单独排除 `workspace/incoming` 中的入站媒体与附件 |
+| `emoji` | `emoji/` 中的表情资源 |
+| `providers` | `providers/presets/` 中的自定义提供商 |
+| `personas` | `personas/` 中的人格定义 |
 
 不包含：
 
@@ -29,8 +28,8 @@
 
 ## 安全
 
-备份包含加密 API 密钥库 **和** RSA 私钥，两者结合可以解密模型密钥。请把 zip
-当成密码保管：
+勾选凭据后，备份可包含加密 API 密钥库 **和** RSA 私钥，两者结合可以解密模型密钥。
+请把这类 ZIP 当成密码保管：
 
 - **ZIP 本身没有加密**；`0600`/`0700` 只是本机文件权限，不是密码保护。
 - 压缩包和 sidecar 权限为 `0600`；新建备份目录尝试 `0700`。
@@ -47,8 +46,8 @@
 - `backup.directory`：备份目录；留空使用 `~/Karen_Backups`。相对路径按用户
   主目录解析。已存在的目录必须属于当前用户，且不能对组/其他用户开放
   （例如 `0755` 会被拒绝，请先 `chmod 700`）；不会擅自修改已有目录权限。
-- `backup.include_media`：是否包含 `workspace/incoming` 的入站媒体；默认包含。
-  关闭后聊天数据库和文字仍会备份。
+- `backup.include_media`：选择工作区时，是否默认包含 `workspace/incoming` 的媒体与附件。
+  可为单次备份切换；排除入站文件不会排除已选的聊天数据库。
 
 ## 卸载前备份
 
@@ -86,7 +85,7 @@
 
 ## 离线验证与恢复演练
 
-本功能仍不提供 WebUI 在线一键恢复。可以在隔离目录中做只读验证：
+可以在恢复前独立校验归档并在隔离目录演练：
 
 ```bash
 # 结构/CRC/成员 hash/SQLite quick_check/密钥配对
@@ -106,7 +105,20 @@
 重复成员、异常压缩比和超限成员；解压使用 `O_EXCL`，拒绝覆盖非空目录，不执行
 包内脚本。`drill` 默认使用系统临时目录并在验证后清理，`--keep` 可保留。
 
-## 恢复（手动）
+## 从控制台恢复指定内容
+
+1. 在「设置 → 备份」找到一个用户数据导出包，点击「选择恢复」；页面校验归档并显示各类别在归档中的大小。
+2. 勾选需要恢复的类别并预览。查看各类别的归档大小、当前数据大小、覆盖与新增文件数；改选后重新预览。
+3. 输入 `恢复备份` 并启动任务。系统先暂停 Runtime 并创建回滚备份；若快照未完整生成，原数据不写入。
+4. 等待任务结果。恢复只覆盖归档中与目标同路径的文件、添加本机缺少的归档文件，保留未选类别及归档未收录的本机文件。写入或重启失败时，后端尝试回滚；此前在运行的 Runtime 会尝试重新启动。
+
+恢复凭据时要求归档中的密钥材料可验证，并同步 RSA 私钥到当前密钥存储。
+用户数据恢复按文件覆盖；它不会合并归档生成后的新聊天记录，也不会撤销已发送的消息。
+当前实例或归档带有迁移/删除账本时，在线恢复会拒绝聊天/RAG类别；这些数据必须由维护控制器
+检查新消息和删除墓碑后恢复，防止旧备份重新引入已删除的数据。
+严格迁移快照应使用独立的 [迁移流程](migration-snapshot.md)。
+
+## 手动恢复
 
 建议先运行上面的离线验证/drill，再在隔离环境或另一台设备验证。
 
@@ -135,7 +147,7 @@
 
 ## 备份类型与状态
 
-- WebUI 按钮创建 `backup_type=user_export`；`migration_snapshot` 只能由可信
+- GUI 和 WebUI 创建 `backup_type=user_export`；`migration_snapshot` 只能由可信
   维护控制器/`SnapshotBarrier` 通过 core API 触发，不能从普通按钮冒充。旧包
   显示为 `legacy_user_export`。
 - manifest 记录 `format_version`、`backup_type`、`validation_status`、
@@ -198,10 +210,14 @@
 
 ## API
 
-- `POST /api/backup`：启动任务，返回 job。
+- `GET /api/backup/components`：获取各类别的可用性、文件数和未压缩源数据大小，包含工作区带/不带媒体两种估算。
+- `POST /api/backup`：启动备份任务；可传 `components` 类别 ID 数组和 `include_media`，省略类别保持全选行为。
 - `GET /api/backup/status`：目录、配置、最近 job 和备份文件。
 - `GET /api/backup/jobs/{id}`：轮询任务。
 - `POST /api/backup/jobs/{id}/cancel`：请求合作式取消。
 - `POST /api/backup/verify`：对指定已存在包做只读验证（`deep_sqlite` 默认
-  开启），返回 members/hash/SQLite/密钥报告，禁止缓存。
+  开启），返回分类大小和归档成员、哈希、SQLite、密钥检查结果，禁止缓存。
+- `POST /api/backup/restore/preview`：传入 `filename` 和 `components`，返回归档与当前目标的分类大小、覆盖/新增统计、警告和确认短语。
+- `POST /api/backup/restore`：传入预览对应的 `filename`、`components` 和 `confirmation`，验证后启动恢复任务。
+- `GET /api/backup/restore/jobs/{id}`：查询恢复任务的状态、分类进度和回滚备份文件名。
 - `GET /api/backup/files/{name}`：下载 zip（鉴权、no-store）。

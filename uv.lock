@@ -2022,7 +2022,7 @@ wheels = [
 
 [[package]]
 name = "karenbot"
-version = "1.0.11a0"
+version = "2.1.3a0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },

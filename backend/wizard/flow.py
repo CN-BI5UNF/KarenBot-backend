@@ -53,6 +53,15 @@ _CUSTOM_SEQUENCE = [
 ]
 
 
+def _sequence(path: str, context: dict[str, Any]) -> list[StepId]:
+    sequence = list(
+        _RECOMMENDED_SEQUENCE if path == WIZARD_PATH_RECOMMENDED else _CUSTOM_SEQUENCE
+    )
+    if context.get("persona_source") == "create":
+        sequence.insert(sequence.index(StepId.PERSONA) + 1, StepId.PERSONA_CREATE)
+    return sequence
+
+
 # ============================================================
 # 流转函数
 # ============================================================
@@ -85,11 +94,7 @@ def next_step(
         return StepId.SUMMARY
 
     # 主流：按路径序列推进
-    sequence = (
-        _RECOMMENDED_SEQUENCE
-        if path == WIZARD_PATH_RECOMMENDED
-        else _CUSTOM_SEQUENCE
-    )
+    sequence = _sequence(path, context)
 
     try:
         idx = sequence.index(current)
@@ -118,11 +123,7 @@ def prev_step(
     if current == StepId.PERSONA_CREATE:
         return StepId.PERSONA
 
-    sequence = (
-        _RECOMMENDED_SEQUENCE
-        if path == WIZARD_PATH_RECOMMENDED
-        else _CUSTOM_SEQUENCE
-    )
+    sequence = _sequence(path, context)
 
     try:
         idx = sequence.index(current)
@@ -143,20 +144,7 @@ def progress(current: StepId, path: str, context: dict[str, Any]) -> tuple[int, 
 
     分支步骤（PERSONA_CREATE）参与计数。
     """
-    sequence = (
-        _RECOMMENDED_SEQUENCE
-        if path == WIZARD_PATH_RECOMMENDED
-        else _CUSTOM_SEQUENCE
-    )
-    sequence = list(sequence)
-
-    source = context.get("persona_source")
-    if source == "create":
-        try:
-            persona_idx = sequence.index(StepId.PERSONA)
-            sequence.insert(persona_idx + 1, StepId.PERSONA_CREATE)
-        except ValueError:
-            pass
+    sequence = _sequence(path, context)
 
     total = len(sequence)
     try:

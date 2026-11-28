@@ -467,6 +467,7 @@ class RuntimeHost:
           引用它的 Agent 一起打回原形。要真正重置得显式传 ``replace_providers``。
         - **写盘前跑一次 RootConfig 校验。** Agent 引用不存在的 provider 这类错误
           必须在这里拦住，否则会写出一份启动时才炸的配置。
+        未在向导中提交的配置保持原值，包括网络、备份、存储、其它渠道和密钥引用。
         """
         from app_config.loader import load_config, save_config
         from app_config.schema import (
@@ -477,6 +478,7 @@ class RuntimeHost:
             FeaturesConfig,
             LongTermMemoryConfig,
             NapCatAdapterConfig,
+            OneBot11BaseConfig,
             PersonaConfig,
             ProviderConfig,
             ReasoningConfig,
@@ -527,20 +529,26 @@ class RuntimeHost:
                 key_id = requested_key_id
             else:
                 key_id = ""
-            providers[pid] = ProviderConfig(
-                preset=item.get("preset") or None,
-                display_name=item.get("display_name") or pid,
-                protocol=item.get("protocol") or None,
-                base_url=item.get("base_url") or None,
-                api_key_id=key_id or None,
-                extra_headers=dict(item.get("extra_headers") or {}),
-                timeout_seconds=float(item.get("timeout_seconds") or 120.0),
-                model_vendor=item.get("model_vendor") or None,
-                reasoning_style=item.get("reasoning_style") or None,
-                reasoning_effort_style=item.get("reasoning_effort_style") or None,
-            )
+            provider_data = existing_provider.model_dump() if existing_provider is not None else {}
+            submitted_provider = {
+                "preset": item.get("preset") or None,
+                "display_name": item.get("display_name") or pid,
+                "protocol": item.get("protocol") or None,
+                "base_url": item.get("base_url") or None,
+                "api_key_id": key_id or None,
+                "extra_headers": dict(item.get("extra_headers") or {}),
+                "timeout_seconds": float(item.get("timeout_seconds") or 120.0),
+                "model_vendor": item.get("model_vendor") or None,
+                "reasoning_style": item.get("reasoning_style") or None,
+                "reasoning_effort_style": item.get("reasoning_effort_style") or None,
+            }
+            for key, value in submitted_provider.items():
+                if key in item or existing_provider is None or key == "api_key_id":
+                    provider_data[key] = value
+            providers[pid] = ProviderConfig.model_validate(provider_data)
 
-        if existing is not None and not payload.get("replace_providers"):
+        reset_providers = bool(payload.get("replace_providers"))
+        if existing is not None and not reset_providers:
             all_providers = {
                 pid: provider.model_copy(deep=True)
                 for pid, provider in existing.providers.items()
@@ -550,6 +558,8 @@ class RuntimeHost:
             all_providers = dict(providers)
 
         chat_in = payload.get("chat") or {}
+        if existing is not None:
+            chat_in = _patch_mapping(existing.agents.chat.model_dump(), chat_in)
         chat_provider = str(chat_in.get("provider") or "").strip()
         if chat_provider not in all_providers:
             chat_provider = next(iter(providers))
@@ -559,13 +569,21 @@ class RuntimeHost:
 
         def _reasoning(agent_in: dict[str, Any]) -> ReasoningConfig | None:
             """向导里思考是个开关 + 档位；三项都缺就不配 reasoning。"""
-            if not any(k in agent_in for k in ("reasoning", "reasoning_budget")):
+            if not any(k in agent_in for k in ("reasoning", "reasoning_budget", "reasoning_max_tokens")):
                 return None
-            return ReasoningConfig(
-                enabled=bool(agent_in.get("reasoning")),
-                budget=agent_in.get("reasoning_budget") or None,
-                max_tokens=agent_in.get("reasoning_max_tokens") or None,
+            raw = agent_in.get("reasoning")
+            if raw is None and not any(k in agent_in for k in ("reasoning_budget", "reasoning_max_tokens")):
+                return None
+            reasoning = (
+                ReasoningConfig.model_validate(raw)
+                if isinstance(raw, dict)
+                else ReasoningConfig(enabled=bool(raw))
             )
+            if "reasoning_budget" in agent_in:
+                reasoning.budget = agent_in.get("reasoning_budget") or None
+            if "reasoning_max_tokens" in agent_in:
+                reasoning.max_tokens = agent_in.get("reasoning_max_tokens") or None
+            return reasoning
 
         def _agent(
             agent_in: dict[str, Any],
@@ -574,17 +592,23 @@ class RuntimeHost:
             model: str,
             temperature: float,
             max_tokens: int,
+            existing_agent: Any = None,
         ) -> AgentConfig:
-            kwargs: dict[str, Any] = {
-                "provider": str(agent_in.get("provider") or provider).strip() or provider,
-                "model": str(agent_in.get("model") or model).strip() or model,
-                "temperature": float(agent_in.get("temperature", temperature)),
-                "max_tokens": int(agent_in.get("max_tokens", max_tokens)),
-                "top_p": float(agent_in.get("top_p", 1.0)),
-                "first_token_timeout_seconds": float(
-                    agent_in.get("first_token_timeout_seconds", 30.0)
-                ),
-            }
+            kwargs: dict[str, Any] = (
+                existing_agent.model_dump() if existing_agent is not None else {}
+            )
+            kwargs.update(
+                {
+                    "provider": str(agent_in.get("provider") or provider).strip() or provider,
+                    "model": str(agent_in.get("model") or model).strip() or model,
+                    "temperature": float(agent_in.get("temperature", temperature)),
+                    "max_tokens": int(agent_in.get("max_tokens", max_tokens)),
+                    "top_p": float(agent_in.get("top_p", 1.0)),
+                    "first_token_timeout_seconds": float(
+                        agent_in.get("first_token_timeout_seconds", 30.0)
+                    ),
+                }
+            )
             reasoning = _reasoning(agent_in)
             if reasoning is not None:
                 kwargs["reasoning"] = reasoning
@@ -596,8 +620,9 @@ class RuntimeHost:
             model=chat_model,
             temperature=0.6,
             max_tokens=16384,
+            existing_agent=existing.agents.chat if existing is not None else None,
         )
-        # 子 Agent 各自可以有自己的 provider/model；缺省时跟随主模型
+        # 首次配置的子 Agent 缺省跟随主模型；已有配置未提交的子 Agent 保持原样。
         agents_in = payload.get("agents") or {}
         sub_agents: dict[str, AgentConfig | None] = {}
         for name, default_temp, default_tokens in (
@@ -605,6 +630,10 @@ class RuntimeHost:
             ("summary", 0.1, 8192),
             ("persona_gen", 0.7, 8192),
         ):
+            if existing is not None and not reset_providers and name not in agents_in:
+                old_agent = getattr(existing.agents, name)
+                sub_agents[name] = old_agent.model_copy(deep=True) if old_agent is not None else None
+                continue
             item = agents_in.get(name)
             if item is False:          # 老前端用布尔表示开关
                 sub_agents[name] = None
@@ -616,17 +645,27 @@ class RuntimeHost:
                 continue
             if not isinstance(item, dict):
                 item = {}
+            # 显式替换 providers 时恢复首次配置的绑定规则，不能保留已被
+            # 删除的 provider 引用；普通重交仍保留未展示的 Agent 参数。
+            old_agent = (
+                getattr(existing.agents, name)
+                if existing is not None and not reset_providers
+                else None
+            )
+            if old_agent is not None:
+                item = _patch_mapping(old_agent.model_dump(), item)
             sub_agents[name] = _agent(
                 item,
                 provider=chat_provider,
                 model=chat_model,
                 temperature=default_temp,
                 max_tokens=default_tokens,
+                existing_agent=old_agent,
             )
 
         adapter_in = payload.get("adapter") or {}
+        existing_adapter = existing.adapters.get("default") if existing is not None else None
         if existing is not None and "whitelist" not in adapter_in:
-            existing_adapter = existing.adapters.get("default")
             whitelist = (
                 existing_adapter.whitelist.model_copy(deep=True)
                 if existing_adapter is not None
@@ -640,14 +679,27 @@ class RuntimeHost:
                 qq_ids=_str_list(whitelist_in.get("qq_ids")),
                 group_ids=_str_list(whitelist_in.get("group_ids")),
             )
-        adapter = NapCatAdapterConfig(
-            enabled=bool(adapter_in.get("enabled", True)),
-            mode=adapter_in.get("mode") or "client",
-            host=adapter_in.get("host") or "127.0.0.1",
-            port=int(adapter_in.get("port") or 3000),
-            path=adapter_in.get("path") or "/",
-            whitelist=whitelist,
+        # 向导只展示最基础的 WS 字段；已有配置中的 token 引用、HTTP API、
+        # Webhook 等隐藏字段不能因为没有再次提交就丢失。
+        adapter_data = (
+            existing_adapter.model_dump()
+            if isinstance(existing_adapter, OneBot11BaseConfig)
+            else {"port": 3000}
         )
+        for key in ("enabled", "mode", "host", "port", "path"):
+            if key in adapter_in:
+                adapter_data[key] = adapter_in[key]
+        if "mode" in adapter_in:
+            adapter_data["transport"] = (
+                "ws_server" if adapter_in["mode"] == "server" else "ws_client"
+            )
+        adapter_data["whitelist"] = whitelist
+        adapter_cls = (
+            type(existing_adapter)
+            if isinstance(existing_adapter, OneBot11BaseConfig)
+            else NapCatAdapterConfig
+        )
+        adapter = adapter_cls(**adapter_data)
         token = (adapter_in.get("access_token") or "").strip()
         if token:
             pending_secrets["napcat_default_token"] = token
@@ -698,7 +750,18 @@ class RuntimeHost:
                 },
             )
 
-        cfg = RootConfig(
+        root_data = existing.model_dump() if existing is not None else {}
+        behavior_data = existing.behavior.model_dump() if existing is not None else {}
+        behavior_data = _patch_mapping(
+            behavior_data, _behavior_overrides(payload.get("behavior") or {})
+        )
+        persona_data = existing.persona.model_dump() if existing is not None else {}
+        if "persona" in payload or existing is None:
+            persona_data["active"] = payload.get("persona") or "大肥鱼"
+        adapters = copy.deepcopy(existing.adapters) if existing is not None else {}
+        if "adapter" in payload or existing is None:
+            adapters["default"] = adapter
+        root_data.update(
             providers=all_providers,
             agents=AgentsConfig(
                 chat=chat_agent,
@@ -707,17 +770,14 @@ class RuntimeHost:
                 persona_gen=sub_agents["persona_gen"],
             ),
             features=features_cfg,
-            behavior=BehaviorConfig(**_behavior_overrides(payload.get("behavior") or {})),
-            persona=PersonaConfig(active=payload.get("persona") or "大肥鱼"),
-            adapters={"default": adapter},
-            # 重跑首次配置只重置渠道/模型；用户配置的外部程序必须保留。
-            programs=existing.programs if existing is not None else {},
+            behavior=BehaviorConfig(**behavior_data),
+            persona=PersonaConfig(**persona_data),
+            adapters=adapters,
         )
-
         # 写盘前跑一次完整校验：Agent/视觉引用不存在的 provider 这类错误
         # 必须在这里拦住，否则会写出一份启动时才炸的配置。
         try:
-            RootConfig.model_validate(cfg.model_dump())
+            cfg = RootConfig.model_validate(root_data)
         except Exception as e:  # noqa: BLE001
             raise ValueError(f"配置校验未通过：{e}") from e
 

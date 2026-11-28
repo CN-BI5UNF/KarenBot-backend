@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 from typing import Annotated, Any, Literal
 
@@ -564,40 +565,61 @@ async def probe_web_search(
 
 def _coerce(value: Any, spec: dict[str, Any]) -> Any:
     kind = spec.get("type")
+    label = str(spec.get("label") or spec.get("path") or "这个设置")
+
+    def invalid(message: str) -> HTTPException:
+        return HTTPException(status_code=400, detail=f"{label}：{message}")
+
     if kind == "bool":
+        if isinstance(value, bool):
+            return value
         if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        elif isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        raise invalid("请填写 true/false（开启/关闭）")
     if kind in {"int", "int_or_none"}:
         if value in (None, "", "null") and kind == "int_or_none":
             return None
         try:
+            if isinstance(value, bool):
+                raise ValueError("boolean is not an integer setting")
             if isinstance(value, float) and not value.is_integer():
                 raise ValueError("not an integer")
-            return int(value)
-        except (TypeError, ValueError) as e:
-            raise HTTPException(
-                status_code=400, detail="这个设置需要整数"
-            ) from e
+            converted = int(value)
+        except (TypeError, ValueError, OverflowError) as e:
+            raise invalid("请填写整数") from e
+        if spec.get("min") is not None and converted < spec["min"]:
+            raise invalid(f"不能小于 {spec['min']}")
+        if spec.get("max") is not None and converted > spec["max"]:
+            raise invalid(f"不能大于 {spec['max']}")
+        return converted
     if kind == "float":
         try:
-            return float(value)
-        except (TypeError, ValueError) as e:
-            raise HTTPException(
-                status_code=400, detail="这个设置需要数字"
-            ) from e
+            if isinstance(value, bool):
+                raise ValueError("boolean is not a numeric setting")
+            converted = float(value)
+            if not math.isfinite(converted):
+                raise ValueError("not a finite number")
+        except (TypeError, ValueError, OverflowError) as e:
+            raise invalid("请填写有限的数字") from e
+        if spec.get("min") is not None and converted < spec["min"]:
+            raise invalid(f"不能小于 {spec['min']}")
+        if spec.get("max") is not None and converted > spec["max"]:
+            raise invalid(f"不能大于 {spec['max']}")
+        return converted
     if kind == "list_int":
         if value in (None, ""):
             return []
-        try:
-            if isinstance(value, str):
-                parts = [p for p in value.replace("，", ",").split(",") if p.strip()]
-                return [int(p.strip()) for p in parts]
-            return [int(v) for v in value]
-        except (TypeError, ValueError) as e:
-            raise HTTPException(
-                status_code=400, detail="这个设置需要整数列表"
-            ) from e
+        if isinstance(value, str):
+            value = [p.strip() for p in value.replace("，", ",").split(",") if p.strip()]
+        if not isinstance(value, list):
+            raise invalid("请填写整数列表")
+        return [_coerce(item, {"type": "int", "label": label}) for item in value]
     if kind == "list_str":
         if value in (None, ""):
             return []
@@ -605,7 +627,9 @@ def _coerce(value: Any, spec: dict[str, Any]) -> Any:
             # 逗号或换行都当作分隔符：用户从别处粘贴列表时两种都常见
             parts = re.split(r"[,\n，]", value)
             return [p.strip() for p in parts if p.strip()]
-        return [str(v) for v in value]
+        if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+            raise invalid("请填写文本列表，或用逗号、换行分隔")
+        return value
     if kind == "json":
         if value in (None, ""):
             return None
@@ -618,9 +642,9 @@ def _coerce(value: Any, spec: dict[str, Any]) -> Any:
                 ) from e
         return value
     if kind == "enum":
-        allowed = {opt[0] for opt in spec.get("options", [])}
-        if allowed and value not in allowed:
-            raise HTTPException(status_code=400, detail=f"取值必须是 {sorted(allowed)} 之一")
+        allowed = [opt[0] for opt in spec.get("options", [])]
+        if isinstance(value, (dict, list)) or (allowed and value not in allowed):
+            raise invalid(f"请选择有效选项：{', '.join(map(str, allowed))}")
         return value
     return value
 

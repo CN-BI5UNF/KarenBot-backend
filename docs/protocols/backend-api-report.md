@@ -167,6 +167,23 @@ FastAPI 默认错误：
 | `protocols[].config_model` | `string` | 对应 `config_schema.$defs` 的 key |
 | `config_schema` | JSON Schema | 每个协议的完整配置模型，含 `type` 判别字段 |
 
+### 2.1.1 `GET /api/adapters/docs/{protocol_id}`
+
+读取协议目录登记的介绍文档，供 WebUI 与 GUI 在“渠道与协议”页面内展示。
+响应只包含 `docs/protocols/` 下的 Markdown 文件，不接受任意文件路径：
+
+```json
+{
+  "ok": true,
+  "protocol": {"id": "napcat", "name": "OneBot 11 / NapCatQQ"},
+  "path": "docs/protocols/onebot11.md",
+  "markdown": "# OneBot 11 接入指南\\n..."
+}
+```
+
+文档缺失、协议不存在或文档路径不在允许目录时返回 `404`。该接口不依赖
+Runtime 已启动，但需要当前安装目录保留协议文档。
+
 #### 前端用法
 
 1. 用 `protocols` 渲染协议卡片/选择器；`status: planned` 禁用保存按钮。

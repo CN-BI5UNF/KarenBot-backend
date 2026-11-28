@@ -260,7 +260,7 @@ COPY: dict[str, str] = {
     "summary.section_adapter": "渠道",
     "summary.section_persona": "人格",
     "summary.adjust_later_hint": "之后随时能在设置里调整。",
-    "summary.start_button": "启动",
+    "summary.start_button": "完成配置",
 
     # ============================================================
     # 通用错误

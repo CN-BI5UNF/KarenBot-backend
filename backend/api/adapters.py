@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, HTTPException, Request
@@ -64,6 +65,57 @@ async def list_protocols() -> dict[str, Any]:
         "protocols": protocol_catalog(),
         "config_schema": _ADAPTER_CONFIG_SCHEMA,
         "frontend_doc": "docs/protocols/frontend-integration.md",
+    }
+
+
+@router.get("/docs/{protocol_id}")
+async def get_protocol_docs(request: Request, protocol_id: str) -> dict[str, Any]:
+    """Return the introduction document for one catalogued protocol.
+
+    The catalog deliberately stores a repository-relative document path so the
+    same metadata can be used by release tooling.  It must not become an
+    arbitrary file reader when exposed through the control API, therefore this
+    endpoint resolves only catalog entries below ``docs/protocols``.
+    """
+    protocol = next(
+        (item for item in protocol_catalog() if item.get("id") == protocol_id),
+        None,
+    )
+    if protocol is None:
+        raise HTTPException(status_code=404, detail="未知协议")
+
+    document_ref = str(protocol.get("docs") or "").strip()
+    if not document_ref:
+        raise HTTPException(status_code=404, detail="该协议暂无介绍文档")
+
+    raw_project_root = getattr(getattr(request.app.state, "host", None), "project_root", None)
+    if not raw_project_root:
+        raise HTTPException(status_code=404, detail="协议介绍文档暂不可用")
+
+    project_root = Path(raw_project_root).resolve()
+    docs_root = (project_root / "docs" / "protocols").resolve()
+    document_path = (project_root / document_ref).resolve()
+    try:
+        docs_root.relative_to(project_root)
+        document_path.relative_to(docs_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="协议介绍文档暂不可用") from exc
+    if document_path.suffix.lower() != ".md" or not document_path.is_file():
+        raise HTTPException(status_code=404, detail="协议介绍文档暂不可用")
+
+    try:
+        markdown = await asyncio.to_thread(document_path.read_text, encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise HTTPException(status_code=404, detail="协议介绍文档暂不可用") from exc
+
+    return {
+        "ok": True,
+        "protocol": {
+            "id": protocol.get("id"),
+            "name": protocol.get("name"),
+        },
+        "path": document_ref,
+        "markdown": markdown,
     }
 
 

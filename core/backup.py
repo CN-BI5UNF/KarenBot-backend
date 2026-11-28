@@ -64,6 +64,24 @@ SIDECAR_SUFFIX = ".json"
 CHUNK_SIZE = 1024 * 1024
 SPACE_MARGIN = 64 * 1024 * 1024
 SQLITE_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
+BACKUP_COMPONENTS: tuple[tuple[str, str], ...] = (
+    ("config", "配置与偏好"),
+    ("credentials", "加密凭据与密钥"),
+    ("chats", "聊天与记忆"),
+    ("rag", "向量记忆"),
+    ("workspace", "工作区文件与媒体"),
+    ("emoji", "表情资源"),
+    ("providers", "自定义提供商"),
+    ("personas", "人格定义"),
+)
+BACKUP_COMPONENT_IDS = frozenset(component_id for component_id, _ in BACKUP_COMPONENTS)
+COMPONENT_CONFIG_FILES = (
+    "config.yaml", "token_calibration.json", "persona_brief.json", "slang.json",
+    "knowledge.json", "knowledge_state.json",
+)
+COMPONENT_CREDENTIAL_FILES = (
+    "secrets.enc", "secrets.meta", "rsa_public.pem", "rsa_private.pem",
+)
 STORE_SUFFIXES = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".avif",
     ".mp4", ".mov", ".mkv", ".webm", ".avi", ".flv",
@@ -78,6 +96,47 @@ EXCLUDED_NAMES = {
     "webui_token.txt",
     "update_state.json",
 }
+
+
+def _backup_component_for_path(arcname: str) -> str:
+    """Map a validated archive path to a stable user-facing backup component."""
+    if arcname.startswith("personas/"):
+        return "personas"
+    for prefix, component in (
+        ("data/memory/", "chats"),
+        ("data/vector/", "rag"),
+        ("data/workspace/", "workspace"),
+        ("data/emoji/", "emoji"),
+        ("data/providers/presets/", "providers"),
+    ):
+        if arcname.startswith(prefix):
+            return component
+    name = arcname.removeprefix("data/")
+    if name in COMPONENT_CREDENTIAL_FILES:
+        return "credentials"
+    if name in COMPONENT_CONFIG_FILES:
+        return "config"
+    # Strict migration snapshots also carry maintenance state. It is not a
+    # selectable user-export component and remains covered by manifest totals.
+    if name.startswith("maintenance"):
+        return "maintenance"
+    return "config"
+
+
+def _validate_component_selection(components: Any) -> set[str]:
+    """Normalize a client selection; omitted legacy requests select all."""
+    if components is None:
+        return set(BACKUP_COMPONENT_IDS)
+    if not isinstance(components, (list, tuple, set)) or isinstance(components, str):
+        raise BackupError("invalid_components", "components 必须是组件 ID 数组")
+    selected: set[str] = set()
+    for value in components:
+        if not isinstance(value, str) or value not in BACKUP_COMPONENT_IDS:
+            raise BackupError("invalid_components", f"未知备份组件：{value!r}")
+        selected.add(value)
+    if not selected:
+        raise BackupError("invalid_components", "至少选择一种备份内容")
+    return selected
 
 
 class BackupError(RuntimeError):
@@ -378,6 +437,30 @@ def _format_bytes(value: int) -> str:
     if value >= 1024:
         return f"{value / 1024:.1f} KiB"
     return f"{value} B"
+
+
+def _component_totals(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    totals: dict[str, dict[str, int]] = {}
+    for entry in entries:
+        path = str(entry.get("path") or "")
+        component_id = str(entry.get("component") or _backup_component_for_path(path))
+        item = totals.setdefault(component_id, {"bytes": 0, "files": 0})
+        item["bytes"] += max(0, int(entry.get("size") or 0))
+        item["files"] += 1
+    labels = dict(BACKUP_COMPONENTS) | {"maintenance": "维护状态（迁移快照）"}
+    ordered = [component_id for component_id, _ in BACKUP_COMPONENTS]
+    if "maintenance" in totals:
+        ordered.append("maintenance")
+    return [
+        {
+            "id": component_id,
+            "label": labels[component_id],
+            "bytes": totals[component_id]["bytes"],
+            "formatted": _format_bytes(totals[component_id]["bytes"]),
+            "files": totals[component_id]["files"],
+        }
+        for component_id in ordered if component_id in totals
+    ]
 
 
 def _zip_date(timestamp: float) -> tuple[int, int, int, int, int, int]:
@@ -683,6 +766,51 @@ class BackupService:
             },
         }
 
+    def component_status(self, *, include_media: bool | None = None) -> dict[str, Any]:
+        """Report logical uncompressed size for each selectable content group."""
+        warnings: list[str] = []
+        media = self.include_media if include_media is None else bool(include_media)
+        sources, rsa_private, rsa_source = self._collect_sources(
+            warnings, True, job_id=None, strict=False,
+        )
+        sizes = {component_id: {"bytes": 0, "files": 0} for component_id in BACKUP_COMPONENT_IDS}
+        without_media = {component_id: {"bytes": 0, "files": 0} for component_id in BACKUP_COMPONENT_IDS}
+        for source in sources:
+            component_id = _backup_component_for_path(source.arcname)
+            if component_id in sizes:
+                sizes[component_id]["bytes"] += max(0, int(source.size))
+                sizes[component_id]["files"] += 1
+                if not self._is_excluded(source.path, False, strict=False):
+                    without_media[component_id]["bytes"] += max(0, int(source.size))
+                    without_media[component_id]["files"] += 1
+        if rsa_private is not None and rsa_source == "keyring":
+            sizes["credentials"]["bytes"] += len(rsa_private)
+            sizes["credentials"]["files"] += 1
+            without_media["credentials"]["bytes"] += len(rsa_private)
+            without_media["credentials"]["files"] += 1
+        items = []
+        for component_id, label in BACKUP_COMPONENTS:
+            item = sizes[component_id] if media else without_media[component_id]
+            items.append({
+                "id": component_id,
+                "label": label,
+                "bytes": item["bytes"],
+                "formatted": _format_bytes(item["bytes"]),
+                "bytes_with_media": sizes[component_id]["bytes"],
+                "bytes_without_media": without_media[component_id]["bytes"],
+                "media_bytes": max(0, sizes[component_id]["bytes"] - without_media[component_id]["bytes"]),
+                "files": item["files"],
+                "available": item["files"] > 0,
+            })
+        total = sum(item["bytes"] for item in items)
+        return {
+            "components": items,
+            "total_bytes": total,
+            "total_formatted": _format_bytes(total),
+            "include_media": media,
+            "warnings": warnings,
+        }
+
     # ============================================================
     # Job 生命周期
     # ============================================================
@@ -691,9 +819,11 @@ class BackupService:
         self,
         *,
         include_media: bool | None = None,
+        components: list[str] | tuple[str, ...] | set[str] | None = None,
         backup_type: str = BACKUP_TYPE_USER_EXPORT,
         barrier: Any | None = None,
         snapshot_meta: dict[str, Any] | None = None,
+        _rollback: bool = False,
     ) -> dict:
         from core.snapshot_barrier import SnapshotBarrier
 
@@ -710,6 +840,10 @@ class BackupService:
             raise BackupError(
                 "snapshot_meta_invalid", "普通用户导出不能携带迁移快照元数据"
             )
+        if backup_type == BACKUP_TYPE_MIGRATION_SNAPSHOT:
+            selected_components = None
+        else:
+            selected_components = _validate_component_selection(components)
         if snapshot_meta is not None:
             if not isinstance(snapshot_meta, dict):
                 raise BackupError("snapshot_meta_invalid", "snapshot_meta 必须是对象")
@@ -749,10 +883,25 @@ class BackupService:
                 "warnings": [],
                 "error": None,
                 "include_media": self.include_media if include_media is None else bool(include_media),
+                "selected_components": (
+                    sorted(selected_components)
+                    if selected_components is not None else None
+                ),
+                "component_progress": {
+                    component_id: {
+                        "estimated_bytes": 0,
+                        "processed_bytes": 0,
+                        "actual_bytes": 0,
+                    }
+                    for component_id in (
+                        selected_components if selected_components is not None else BACKUP_COMPONENT_IDS
+                    )
+                },
                 "directory": str(self.directory),
                 "backup_type": backup_type,
                 "strict": strict,
                 "snapshot_meta": dict(snapshot_meta or {}),
+                "rollback_snapshot": bool(_rollback and not strict),
                 "pid": self._shared.pid,
                 "boot_id": self._shared.boot_id,
                 "cancel_requested": False,
@@ -936,6 +1085,7 @@ class BackupService:
             with self._shared.state_lock:
                 job = dict(self._shared.jobs.get(job_id, {}))
             include_media = bool(job.get("include_media", self.include_media))
+            selected_components = job.get("selected_components")
             backup_type = str(job.get("backup_type") or BACKUP_TYPE_USER_EXPORT)
             strict = backup_type == BACKUP_TYPE_MIGRATION_SNAPSHOT
             snapshot_meta = job.get("snapshot_meta")
@@ -973,6 +1123,11 @@ class BackupService:
                         marker.manifest_fields() if marker is not None else None
                     ),
                     snapshot_meta=snapshot_meta,
+                    rollback=bool(job.get("rollback_snapshot", False)),
+                    components=(
+                        set(selected_components)
+                        if isinstance(selected_components, list) else None
+                    ),
                 ),
                 name=f"backup-worker-{job_id}",
             )
@@ -1171,15 +1326,23 @@ class BackupService:
         strict: bool = False,
         barrier_meta: dict[str, Any] | None = None,
         snapshot_meta: dict[str, Any] | None = None,
+        components: set[str] | None = None,
+        rollback: bool = False,
     ) -> dict:
         warnings: list[str] = []
         self._check_cancel(job_id)
         self._update(job_id, state="running", stage="scanning")
         sources, rsa_private, rsa_source = self._collect_sources(
-            warnings, include_media, job_id=job_id, strict=strict
+            warnings, include_media, job_id=job_id, strict=strict,
+            components=components,
         )
+        if rollback:
+            warnings = [
+                warning for warning in warnings
+                if not warning.startswith(("未找到 config.yaml", "未找到 secrets.enc", "未找到 RSA 私钥"))
+            ]
         self._check_cancel(job_id)
-        if rsa_private is not None:
+        if rsa_private is not None and (components is None or "credentials" in components):
             sources.append(_Source(
                 path=Path("<keyring>"),
                 arcname="data/rsa_private.pem",
@@ -1187,7 +1350,7 @@ class BackupService:
                 kind="key",
                 data=rsa_private,
             ))
-        if not sources:
+        if not sources and not rollback:
             raise BackupError("no_data", "没有找到可备份的用户数据")
         if strict and not include_media:
             raise BackupError(
@@ -1199,6 +1362,30 @@ class BackupService:
             self._validate_strict_sources(sources, rsa_source)
 
         total_bytes = sum(max(0, item.size) for item in sources)
+        progress_components = (
+            set(components) if components is not None else set(BACKUP_COMPONENT_IDS)
+        )
+        if strict:
+            progress_components.add("maintenance")
+        component_progress = {
+            component_id: {
+                "estimated_bytes": 0,
+                "processed_bytes": 0,
+                "actual_bytes": 0,
+            }
+            for component_id in progress_components
+        }
+        for source in sources:
+            component_id = _backup_component_for_path(source.arcname)
+            if component_id in component_progress:
+                component_progress[component_id]["estimated_bytes"] += max(0, source.size)
+        self._update(
+            job_id,
+            component_progress=component_progress,
+            estimated_component_bytes={
+                key: item["estimated_bytes"] for key, item in component_progress.items()
+            },
+        )
         largest_sqlite = max(
             (item.size for item in sources if item.kind == "sqlite"), default=0
         )
@@ -1263,16 +1450,25 @@ class BackupService:
                             archive, source, job_id, warnings, strict=strict
                         )
                     if entry is not None:
+                        entry["component"] = _backup_component_for_path(source.arcname)
                         entries.append(entry)
+                        component_progress[entry["component"]]["actual_bytes"] += int(entry.get("size") or 0)
+                        self._update(job_id, component_progress=component_progress)
                         self._update(job_id, warnings=list(warnings))
 
+                selected_for_manifest = components or set(BACKUP_COMPONENT_IDS)
                 secrets_exists = bool(
-                    getattr(self.paths, "SECRETS_FILE", None)
+                    "credentials" in selected_for_manifest
+                    and getattr(self.paths, "SECRETS_FILE", None)
                     and Path(self.paths.SECRETS_FILE).is_file()
                 )
                 material_present, credential_restorable, credential_verification = (
                     self._credential_capability(rsa_source, rsa_private)
                 )
+                if "credentials" not in selected_for_manifest:
+                    material_present = False
+                    credential_restorable = False
+                    credential_verification = "not_included"
                 db_entries = [
                     entry for entry in entries if entry.get("kind") == "sqlite"
                 ]
@@ -1284,26 +1480,29 @@ class BackupService:
                     for warning in warnings
                 )
                 missing: list[str] = []
-                if not Path(self.paths.CONFIG_FILE).is_file():
+                if not rollback and "config" in selected_for_manifest and not Path(self.paths.CONFIG_FILE).is_file():
                     missing.append("config.yaml")
-                if not secrets_exists:
+                if not rollback and "credentials" in selected_for_manifest and not secrets_exists:
                     missing.append("secrets.enc")
-                if not Path(self.paths.SECRETS_META_FILE).is_file():
+                if not rollback and "credentials" in selected_for_manifest and not Path(self.paths.SECRETS_META_FILE).is_file():
                     missing.append("secrets.meta")
-                if rsa_source == "missing":
+                if not rollback and "credentials" in selected_for_manifest and rsa_source == "missing":
                     missing.append("rsa_private_key")
                 partial = bool(
                     inconsistent
                     or skipped
                     or missing
-                    or (material_present and not credential_restorable)
+                    or (
+                        "credentials" in selected_for_manifest
+                        and material_present and not credential_restorable
+                    )
                 )
                 chat_restorable = any(
                     entry.get("path", "").startswith("data/memory/")
                     and bool(entry.get("consistent", True))
                     for entry in db_entries
                 )
-                media_complete = bool(include_media) and not any(
+                media_complete = "workspace" in selected_for_manifest and bool(include_media) and not any(
                     "workspace/incoming" in warning for warning in warnings
                 )
                 all_sqlite_consistent = all(
@@ -1507,12 +1706,14 @@ class BackupService:
                     "git_commit": self._git_commit(),
                     "instance": getattr(self.paths, "instance_name", "default"),
                     "includes_secrets": secrets_exists,
-                    "includes_keys": bool(secrets_exists or rsa_source != "missing"),
+                    "includes_keys": bool("credentials" in selected_for_manifest and (secrets_exists or rsa_source != "missing")),
                     "credential_material_present": material_present,
                     "credential_restorable": credential_restorable,
                     "credential_verification": credential_verification,
                     "rsa_private_key_source": rsa_source,
                     "include_media": include_media,
+                    "selected_components": sorted(selected_for_manifest),
+                    "components": _component_totals(entries),
                     "files": entries,
                     "missing": missing,
                     "partial": partial,
@@ -1605,6 +1806,10 @@ class BackupService:
                 "include_media": include_media,
                 "rsa_private_key_source": rsa_source,
                 "partial": partial,
+        "selected_components": sorted(
+                    components if components is not None else BACKUP_COMPONENT_IDS
+                ),
+                "components": manifest["components"],
                 "validation_status": validation_status,
                 "capabilities": manifest["capabilities"],
                 "missing": missing,
@@ -1629,6 +1834,8 @@ class BackupService:
                 "credential_restorable": credential_restorable,
                 "credential_material_present": material_present,
                 "capabilities": manifest["capabilities"],
+                "selected_components": manifest["selected_components"],
+                "components": manifest["components"],
                 "missing": missing,
                 "published": True,
             }
@@ -1642,11 +1849,14 @@ class BackupService:
         *,
         job_id: str | None = None,
         strict: bool = False,
+        components: set[str] | None = None,
     ) -> tuple[list[_Source], bytes | None, str]:
         sources: list[_Source] = []
         paths = self.paths
 
         def add_file(path: Path, arcname: str) -> None:
+            if components is not None and _backup_component_for_path(arcname) not in components:
+                return
             self._check_cancel(job_id)
             try:
                 if not path.is_file() or path.is_symlink():
@@ -1658,6 +1868,8 @@ class BackupService:
                 warnings.append(f"跳过无法读取的文件 {path.name}: {exc}")
 
         def add_tree(root: Path, prefix: str) -> None:
+            if components is not None and _backup_component_for_path(prefix + "/") not in components:
+                return
             self._check_cancel(job_id)
             try:
                 if not root.is_dir():
@@ -1708,9 +1920,9 @@ class BackupService:
             (paths.DATA_DIR / "knowledge_state.json", "data/knowledge_state.json"),
         ):
             add_file(Path(path), arcname)
-        if not Path(paths.CONFIG_FILE).is_file():
+        if (components is None or "config" in components) and not Path(paths.CONFIG_FILE).is_file():
             warnings.append("未找到 config.yaml；备份中缺少主配置。")
-        if not Path(paths.SECRETS_FILE).is_file():
+        if (components is None or "credentials" in components) and not Path(paths.SECRETS_FILE).is_file():
             warnings.append("未找到 secrets.enc；API 密钥可能无法恢复。")
 
         add_tree(Path(paths.MEMORY_DIR), "data/memory")
@@ -1732,7 +1944,8 @@ class BackupService:
         # RSA 私钥：优先 keyring 导出；keyring 不可用时退回文件。
         rsa_private: bytes | None = None
         rsa_source = "missing"
-        if self.secrets_manager is not None:
+        credentials_selected = components is None or "credentials" in components
+        if self.secrets_manager is not None and credentials_selected:
             try:
                 exported = self.secrets_manager.export_rsa_private_key()
                 if exported:
@@ -1740,7 +1953,7 @@ class BackupService:
                     rsa_source = "keyring"
             except Exception as exc:  # noqa: BLE001
                 warnings.append(f"无法从系统 keyring 导出 RSA 私钥：{exc}")
-        if rsa_private is None:
+        if rsa_private is None and credentials_selected:
             private_file = Path(paths.RSA_PRIVATE_KEY_FILE)
             if private_file.is_file() and not private_file.is_symlink():
                 add_file(private_file, "data/rsa_private.pem")
@@ -1752,11 +1965,14 @@ class BackupService:
                 )
 
         if include_media is False:
-            warnings.append("已按配置排除 workspace/incoming 入站媒体。")
+            if components is None or "workspace" in components:
+                warnings.append("已按配置排除 workspace/incoming 入站媒体。")
 
         # 去重（同一路径可能同时命中列表和目录；manifest 只保留第一次）。
         unique: dict[str, _Source] = {}
         for item in sources:
+            if components is not None and _backup_component_for_path(item.arcname) not in components:
+                continue
             unique.setdefault(item.arcname, item)
         return list(unique.values()), rsa_private, rsa_source
 
@@ -2104,6 +2320,13 @@ class BackupService:
             job = self._shared.jobs.get(job_id)
             if job is not None:
                 job["processed_bytes"] = int(job.get("processed_bytes") or 0) + amount
+                current = str(job.get("current") or "")
+                component_id = _backup_component_for_path(current) if current else ""
+                progress = job.get("component_progress")
+                if isinstance(progress, dict) and component_id in progress:
+                    item = progress[component_id]
+                    if isinstance(item, dict):
+                        item["processed_bytes"] = int(item.get("processed_bytes") or 0) + amount
 
     def _update(self, job_id: str, **fields: Any) -> None:
         persist_fields = {
@@ -2116,7 +2339,7 @@ class BackupService:
             job = self._shared.jobs.get(job_id)
             if job is not None:
                 job.update(fields)
-        if persist_fields.intersection(fields):
+        if job is not None and persist_fields.intersection(fields):
             self._persist()
 
     def _public_job(self, job: dict) -> dict:
